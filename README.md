@@ -90,7 +90,7 @@ Both modules are in Meteor's **Farming** category. Every feature can be switched
 
 1. Install [Fabric Loader](https://fabricmc.net/use/installer/) for Minecraft **1.21.11**.
 2. Put [Meteor Client](https://meteorclient.com) for 1.21.11 in your `mods` folder.
-3. Download the `qwerte-addon` jar from the [latest release](https://github.com/DustinFoes/Qwerte/releases/latest) and
+3. Download the `qwerte-addon` jar from the [latest release](https://github.com/Qwertze/Qwerte/releases/latest) and
    put it in your `mods` folder.
 4. *(Optional, for auto-walk and refilling)* Download `baritone-api-fabric-1.3.0-1.21.11.jar` from
    [dekrom's Baritone releases](https://github.com/dekrom/baritone/releases/tag/v1.3.0-1.21.11) and put it in your
@@ -216,7 +216,7 @@ Turn the module on with a hoe in your hotbar and walk around. The brown boxes ar
 You need **JDK 21** or newer. Everything else, including Minecraft, Meteor and the Baritone API, is downloaded by Gradle.
 
 ```sh
-git clone https://github.com/DustinFoes/Qwerte.git
+git clone https://github.com/Qwertze/Qwerte.git
 cd Qwerte
 ./gradlew build
 ```

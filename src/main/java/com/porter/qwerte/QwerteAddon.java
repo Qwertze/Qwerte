@@ -34,6 +34,6 @@ public class QwerteAddon extends MeteorAddon {
 
     @Override
     public GithubRepo getRepo() {
-        return new GithubRepo("DustinFoes", "Qwerte");
+        return new GithubRepo("Qwertze", "Qwerte");
     }
 }
