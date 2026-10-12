@@ -403,6 +403,8 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     // Filling holes we pass by
     private BlockPos passingHole;
+    private boolean heldForHole;
+    private int holdTicks;
     private int holeScanTicks;
     private int holeCooldown;
     private final Map<BlockPos, Integer> holeAttempts = new HashMap<>();
@@ -470,6 +472,12 @@ public class AutoTill extends Module implements Restocker.Owner {
     private static final int DIG_TIMEOUT_TICKS = 20 * 10;
     // Baritone can still be sliding to a stop when it says it's done
     private static final int SETTLE_TICKS = 10;
+    // How long a trip waits for us to stop and pour into a hole before carrying on without it
+    private static final int HOLD_TICKS = 20;
+    // Slower than this counts as standing still, so where the server thinks we are matches where we aim from
+    private static final double STILL_SPEED = 0.03;
+    // How far the server's idea of our eyes can be from ours while the aim still lands in the hole
+    private static final double AIM_SLACK = 0.12;
     private static final int MAX_STAND_TRIES = 3;
 
     private State state = State.Working;
@@ -598,6 +606,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         badWaterSpots.clear();
         holeAttempts.clear();
         passingHole = null;
+        heldForHole = false;
         holeScanTicks = 0;
         holeCooldown = 0;
         tillAttempts.clear();
@@ -1022,19 +1031,31 @@ public class AutoTill extends Module implements Restocker.Owner {
      * @return true if it used the tick
      */
     private boolean fillPassingHole() {
-        if (!autoWater.get() || !fillHoles.get()) return false;
+        if (!autoWater.get() || !fillHoles.get()) {
+            resumeAfterHole();
+            return false;
+        }
+
+        Vec3 eyes = mc.player.getEyePosition();
+
+        // Done with the hole we stopped for, or it's taking too long: carry on with the trip
+        if (heldForHole && (passingHole == null || ++holdTicks > HOLD_TICKS || !isOpenHole(passingHole, eyes))) {
+            if (passingHole != null && holdTicks > HOLD_TICKS) badWaterSpots.add(passingHole);
+            passingHole = null;
+            resumeAfterHole();
+        }
+
         if (holeCooldown > 0) {
             holeCooldown--;
-            return false;
+            return heldForHole;
         }
 
         moveToHotbar(Items.WATER_BUCKET);
         if (!findItem(stack -> stack.is(Items.WATER_BUCKET)).found()) {
             passingHole = null;
+            resumeAfterHole();
             return false;
         }
-
-        Vec3 eyes = mc.player.getEyePosition();
 
         if (passingHole != null && !isOpenHole(passingHole, eyes)) passingHole = null;
         if (passingHole == null) {
@@ -1047,11 +1068,26 @@ public class AutoTill extends Module implements Restocker.Owner {
 
         // Out of sight from here; while walking, we'll likely see into it in a moment
         Vec3 aim = findWaterAim(eyes, passingHole);
-        if (aim == null) return false;
+        if (aim == null) {
+            resumeAfterHole();
+            return false;
+        }
+
+        // The server traces the bucket from where it last saw us, which lags behind while we move. Pouring on the move
+        // lands the water a block off, so stop first: pause Baritone mid-trip, or just wait if you're walking yourself.
+        if (mc.player.getDeltaMovement().horizontalDistance() > STILL_SPEED) {
+            if (state != State.Working && !heldForHole) {
+                BaritoneHelper.stop();
+                heldForHole = true;
+                holdTicks = 0;
+            }
+            return heldForHole;
+        }
 
         if (holeAttempts.merge(passingHole, 1, Integer::sum) > 5) {
             badWaterSpots.add(passingHole);
             passingHole = null;
+            resumeAfterHole();
             return false;
         }
 
@@ -1061,6 +1097,20 @@ public class AutoTill extends Module implements Restocker.Owner {
         });
         holeCooldown = 2;
         return true;
+    }
+
+    /**
+     * Picks the trip back up after stopping to fill a hole.
+     */
+    private void resumeAfterHole() {
+        if (!heldForHole) return;
+        heldForHole = false;
+
+        if (state == State.Working || pathTarget == null) return;
+        BaritoneHelper.moveNear(pathTarget, pathRange);
+        goalTicks = 0;
+        stuckTicks = 0;
+        lastPos = mc.player.position();
     }
 
     private BlockPos findOpenHole(Vec3 eyes) {
@@ -1182,15 +1232,34 @@ public class AutoTill extends Module implements Restocker.Owner {
         }
 
         for (Vec3 aim : candidates) {
-            Vec3 dir = aim.subtract(eyes);
-            if (dir.length() > range) continue;
-
-            Vec3 end = eyes.add(dir.normalize().scale(range));
-            BlockHitResult hit = mc.level.clip(new ClipContext(eyes, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
-            if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().relative(hit.getDirection()).equals(spot)) return aim;
+            if (aim.distanceTo(eyes) > range) continue;
+            if (landsIn(eyes, aim, spot) && aimHasSlack(eyes, aim, spot)) return aim;
         }
 
         return null;
+    }
+
+    /**
+     * A bucket used from {@code eyes} looking at {@code aim} pours into {@code spot}.
+     */
+    private boolean landsIn(Vec3 eyes, Vec3 aim, BlockPos spot) {
+        double range = mc.player.blockInteractionRange();
+        Vec3 end = eyes.add(aim.subtract(eyes).normalize().scale(range));
+        BlockHitResult hit = mc.level.clip(new ClipContext(eyes, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
+        return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().relative(hit.getDirection()).equals(spot);
+    }
+
+    /**
+     * The aim still lands in the spot from eyes shifted a little in every direction, in case the server has us
+     * slightly somewhere else.
+     */
+    private boolean aimHasSlack(Vec3 eyes, Vec3 aim, BlockPos spot) {
+        Vec3 look = aim.subtract(eyes);
+        for (Direction dir : HORIZONTALS) {
+            Vec3 shifted = eyes.add(dir.getStepX() * AIM_SLACK, 0, dir.getStepZ() * AIM_SLACK);
+            if (!landsIn(shifted, shifted.add(look), spot)) return false;
+        }
+        return true;
     }
 
     /**
