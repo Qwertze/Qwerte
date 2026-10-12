@@ -479,6 +479,8 @@ public class AutoTill extends Module implements Restocker.Owner {
     private int actionCooldown;
     private int exploreCooldown;
     private final Set<BlockPos> unreachable = new HashSet<>();
+    // Holes we've already walked over to fill, so one we can't fill doesn't pull us back forever
+    private final Set<BlockPos> holeTrips = new HashSet<>();
 
     // Current trip
     private BlockPos pathTarget;
@@ -591,6 +593,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         noAimTicks = 0;
         approachedSpot = null;
         unreachable.clear();
+        holeTrips.clear();
         badPools.clear();
         badWaterSpots.clear();
         holeAttempts.clear();
@@ -1142,10 +1145,10 @@ public class AutoTill extends Module implements Restocker.Owner {
 
         if (!mc.level.getBlockState(pos.above()).isAir()) return false;
 
-        // The hole has to hold the water: solid on every side and underneath
-        if (!isSolid(pos.below())) return false;
+        // The hole has to hold the water: walled in on every side and underneath
+        if (!holdsWater(pos.below())) return false;
         for (Direction dir : HORIZONTALS) {
-            if (!isSolid(pos.relative(dir))) return false;
+            if (!holdsWater(pos.relative(dir))) return false;
         }
 
         // Don't dig out the block you're standing on
@@ -1155,6 +1158,15 @@ public class AutoTill extends Module implements Restocker.Owner {
     private boolean isSolid(BlockPos pos) {
         BlockState state = mc.level.getBlockState(pos);
         return state.getFluidState().isEmpty() && state.isCollisionShapeFullBlock(mc.level, pos);
+    }
+
+    /**
+     * Water can't flow into it. Unlike {@link #isSolid}, this counts farmland and dirt paths, which are a little short of
+     * a full block, so holes in a tilled field qualify.
+     */
+    private boolean holdsWater(BlockPos pos) {
+        BlockState state = mc.level.getBlockState(pos);
+        return state.getFluidState().isEmpty() && !state.canBeReplaced() && !state.getCollisionShape(mc.level, pos).isEmpty();
     }
 
     private Vec3 findWaterAim(Vec3 eyes, BlockPos spot) {
@@ -1464,6 +1476,13 @@ public class AutoTill extends Module implements Restocker.Owner {
         }
 
         BlockPos target = findLand(eyes);
+
+        // All tilled: walk over to a hole we missed that would water dry farmland, fill-holes does the rest
+        if (target == null && autoWater.get() && fillHoles.get() && hasItem(Items.WATER_BUCKET)) {
+            target = findMissedHole(eyes);
+            if (target != null) holeTrips.add(target);
+        }
+
         if (target == null) {
             info("No more land to till within %d blocks, waiting.", searchRadius.get());
             exploreCooldown = 200;
@@ -1471,6 +1490,43 @@ public class AutoTill extends Module implements Restocker.Owner {
         }
 
         goTo(target, exploreRange(), State.Exploring);
+    }
+
+    /**
+     * The nearest open hole within the search area that would water dry land, and that we haven't already walked to.
+     */
+    private BlockPos findMissedHole(Vec3 eyes) {
+        if (home == null) home = mc.player.blockPosition();
+
+        int radius = searchRadius.get();
+        int height = searchHeight.get();
+        int y = mc.player.blockPosition().getY();
+
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+
+        for (BlockPos pos : BlockPos.betweenClosed(home.getX() - radius, y - height - 1, home.getZ() - radius, home.getX() + radius, y + height, home.getZ() + radius)) {
+            double dist = eyes.distanceToSqr(Vec3.atCenterOf(pos));
+            if (dist >= bestDist || !mc.level.getBlockState(pos).isAir()) continue;
+            if (holeTrips.contains(pos) || unreachable.contains(pos) || badWaterSpots.contains(pos)) continue;
+            if (!isHoleShape(pos) || !hydratesDryLand(pos)) continue;
+
+            best = pos.immutable();
+            bestDist = dist;
+        }
+
+        return best;
+    }
+
+    /**
+     * An open 1x1 hole that holds water, without the reach check, for holes further away.
+     */
+    private boolean isHoleShape(BlockPos pos) {
+        if (!mc.level.getBlockState(pos.above()).isAir() || !holdsWater(pos.below())) return false;
+        for (Direction dir : HORIZONTALS) {
+            if (!holdsWater(pos.relative(dir))) return false;
+        }
+        return true;
     }
 
     private BlockPos findLand(Vec3 eyes) {
