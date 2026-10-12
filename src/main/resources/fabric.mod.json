@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "id": "qwerte",
+  "version": "${version}",
+  "name": "Qwerte Addon",
+  "description": "A Meteor Client addon for 2b2t dedicated to regrowing and creating farmland: tills, waters, plants and grows crops, with optional Baritone automation.",
+  "authors": [
+    "Qwertze"
+  ],
+  "contact": {
+    "sources": "https://github.com/DustinFoes/Qwerte"
+  },
+  "license": "GPL-3.0",
+  "icon": "assets/qwerte/icon.png",
+  "environment": "client",
+  "entrypoints": {
+    "meteor": [
+      "com.porter.qwerte.QwerteAddon"
+    ]
+  },
+  "custom": {
+    "meteor-client:color": "225,25,25",
+    "modmenu": {
+      "parent": {
+        "id": "meteor-client"
+      }
+    }
+  },
+  "depends": {
+    "java": ">=21",
+    "minecraft": [
+      "${mc_version}"
+    ],
+    "meteor-client": "*"
+  },
+  "suggests": {
+    "baritone-meteor": "*"
+  }
+}
