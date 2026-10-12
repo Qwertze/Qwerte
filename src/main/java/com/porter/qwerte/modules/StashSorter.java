@@ -1,13 +1,30 @@
 package com.porter.qwerte.modules;
 
 import com.porter.qwerte.QwerteAddon;
+import com.porter.qwerte.compat.RightClick;
+import com.porter.qwerte.stash.Categories;
+import com.porter.qwerte.stash.ItemPreviewScreen;
+import com.porter.qwerte.stash.Stash;
+import com.porter.qwerte.stash.Stash.Box;
 import com.porter.qwerte.utils.BaritoneHelper;
+import meteordevelopment.meteorclient.MeteorClient;
+import meteordevelopment.meteorclient.events.game.GameLeftEvent;
+import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
+import meteordevelopment.meteorclient.gui.GuiTheme;
+import meteordevelopment.meteorclient.gui.widgets.WLabel;
+import meteordevelopment.meteorclient.gui.widgets.WWidget;
+import meteordevelopment.meteorclient.gui.widgets.containers.WHorizontalList;
+import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
+import meteordevelopment.meteorclient.gui.widgets.containers.WVerticalList;
+import meteordevelopment.meteorclient.gui.widgets.input.WTextBox;
+import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.Utils;
+import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -15,13 +32,9 @@ import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
-import net.minecraft.core.component.DataComponents;
-import net.minecraft.core.registries.BuiltInRegistries;
-import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ChestMenu;
-import net.minecraft.world.item.BlockItem;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.StandingSignBlock;
@@ -33,24 +46,34 @@ import net.minecraft.world.level.block.entity.SignBlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.block.state.properties.ChestType;
 import net.minecraft.world.phys.BlockHitResult;
+import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Queue;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
- * Sorts the chests and barrels around you, either into tiers (shulkers first, then stackables, then singles) or into
- * whichever container's signs best describe each item. Items are carried in the inventory slots that were empty when
- * the module was turned on, so the player's own items are never touched.
+ * Sorts a stash of chests and barrels, either into tiers (shulkers first, then stackables, then singles) or into
+ * whichever container's signs best describe each item. The stash is scanned once and saved, then kept up to date
+ * whenever a container in it is opened, even with the module off. It can stay on as a sorting bot, and the saved
+ * stash can be searched from the module's settings or by whitelisted players over whispers.
  */
 public class StashSorter extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
+    private final SettingGroup sgBot = settings.createGroup("Bot");
+    private final SettingGroup sgSlots = settings.createGroup("Slots");
+    private final SettingGroup sgSearch = settings.createGroup("Search");
     private final SettingGroup sgRender = settings.createGroup("Render");
 
     public enum Mode {
@@ -69,7 +92,32 @@ public class StashSorter extends Module {
         }
     }
 
+    public enum Pick {
+        Off("Off"),
+        Exclude("Exclude"),
+        DropOff("Drop-off");
+
+        private final String title;
+
+        Pick(String title) {
+            this.title = title;
+        }
+
+        @Override
+        public String toString() {
+            return title;
+        }
+    }
+
     // General
+
+    private final Setting<String> stashName = sgGeneral.add(new StringSetting.Builder()
+        .name("stash-name")
+        .description("The name the stash is saved under. Each name on each server is its own stash, scanned once and then kept up to date.")
+        .defaultValue("stash")
+        .onChanged(name -> stash = null)
+        .build()
+    );
 
     private final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
         .name("mode")
@@ -78,9 +126,16 @@ public class StashSorter extends Module {
         .build()
     );
 
+    private final Setting<Pick> pick = sgGeneral.add(new EnumSetting.Builder<Pick>()
+        .name("pick")
+        .description("Right-click containers to mark them. Exclude: never sorted into or out of. Drop-off: emptied into the stash, for others to drop items in. Right-click again to unmark. Works while the module is off.")
+        .defaultValue(Pick.Off)
+        .build()
+    );
+
     private final Setting<Integer> radius = sgGeneral.add(new IntSetting.Builder()
         .name("radius")
-        .description("How far around you to look for containers to sort.")
+        .description("How far around you to look for new containers to add to the stash.")
         .defaultValue(8)
         .range(2, 32)
         .sliderRange(2, 24)
@@ -89,7 +144,7 @@ public class StashSorter extends Module {
 
     private final Setting<Integer> height = sgGeneral.add(new IntSetting.Builder()
         .name("height")
-        .description("How far above and below you to look for containers.")
+        .description("How far above and below you to look for new containers.")
         .defaultValue(3)
         .range(0, 16)
         .sliderRange(0, 8)
@@ -98,7 +153,7 @@ public class StashSorter extends Module {
 
     private final Setting<Boolean> barrels = sgGeneral.add(new BoolSetting.Builder()
         .name("barrels")
-        .description("Sorts barrels as well as chests.")
+        .description("Includes barrels as well as chests.")
         .defaultValue(true)
         .build()
     );
@@ -135,11 +190,70 @@ public class StashSorter extends Module {
         .build()
     );
 
+    // Bot
+
+    private final Setting<Boolean> stayOn = sgBot.add(new BoolSetting.Builder()
+        .name("stay-on")
+        .description("Stays on after sorting and keeps the stash sorted: sorts again whenever a container changes, and empties drop-off containers.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Integer> recheck = sgBot.add(new IntSetting.Builder()
+        .name("recheck")
+        .description("Seconds between checks of drop-off containers for new items.")
+        .defaultValue(30)
+        .range(5, 600)
+        .sliderRange(5, 120)
+        .visible(stayOn::get)
+        .build()
+    );
+
+    // Slots
+
+    private final Setting<String> carrySlots = sgSlots.add(new StringSetting.Builder()
+        .name("carry-slots")
+        .description("Slots to carry stash items in, like \"28-36\" or \"1-3, 30\". 1-9 is the hotbar, 10-36 the inventory from top left. Blank uses every slot that's empty when sorting starts.")
+        .defaultValue("")
+        .build()
+    );
+
+    private final Setting<String> keepSlots = sgSlots.add(new StringSetting.Builder()
+        .name("keep-slots")
+        .description("Slots never to touch, even when they're empty, in the same format as carry-slots.")
+        .defaultValue("")
+        .build()
+    );
+
+    // Search
+
+    private final Setting<Boolean> whisperSearch = sgSearch.add(new BoolSetting.Builder()
+        .name("whisper-search")
+        .description("Lets whitelisted players whisper you to search the stash. You whisper back where it is. Works while the module is off.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<List<String>> whitelist = sgSearch.add(new StringListSetting.Builder()
+        .name("whitelist")
+        .description("Players allowed to search the stash by whisper.")
+        .visible(whisperSearch::get)
+        .build()
+    );
+
+    private final Setting<String> prefix = sgSearch.add(new StringSetting.Builder()
+        .name("prefix")
+        .description("Whispers starting with this are searches, like \"find diamonds\". Blank treats every whisper from the whitelist as a search.")
+        .defaultValue("find")
+        .visible(whisperSearch::get)
+        .build()
+    );
+
     // Render
 
     private final Setting<Boolean> render = sgRender.add(new BoolSetting.Builder()
         .name("render")
-        .description("Highlights the container being worked on.")
+        .description("Highlights the container being worked on, and excluded and drop-off containers while picking or sorting.")
         .defaultValue(true)
         .build()
     );
@@ -152,18 +266,26 @@ public class StashSorter extends Module {
         .build()
     );
 
-    private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
-        .name("side-color")
-        .description("The side color of the highlight.")
-        .defaultValue(new SettingColor(255, 170, 0, 40))
+    private final Setting<SettingColor> workColor = sgRender.add(new ColorSetting.Builder()
+        .name("work-color")
+        .description("The container being worked on.")
+        .defaultValue(new SettingColor(255, 170, 0, 60))
         .visible(render::get)
         .build()
     );
 
-    private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
-        .name("line-color")
-        .description("The line color of the highlight.")
-        .defaultValue(new SettingColor(255, 170, 0, 255))
+    private final Setting<SettingColor> excludedColor = sgRender.add(new ColorSetting.Builder()
+        .name("excluded-color")
+        .description("Containers excluded from sorting.")
+        .defaultValue(new SettingColor(255, 50, 50, 60))
+        .visible(render::get)
+        .build()
+    );
+
+    private final Setting<SettingColor> dropOffColor = sgRender.add(new ColorSetting.Builder()
+        .name("drop-off-color")
+        .description("Drop-off containers.")
+        .defaultValue(new SettingColor(50, 150, 255, 60))
         .visible(render::get)
         .build()
     );
@@ -172,45 +294,28 @@ public class StashSorter extends Module {
     private static final int OPEN_TIMEOUT = 20 * 4;
     private static final int WALK_TIMEOUT = 20 * 60;
     private static final int PATH_GRACE_TICKS = 10;
+    // Whispers back are spaced out so the server doesn't kick us for spam
+    private static final int REPLY_GAP_TICKS = 20 * 3;
 
     private static final Direction[] HORIZONTALS = { Direction.NORTH, Direction.SOUTH, Direction.WEST, Direction.EAST };
 
     // Baritone is optional, BaritoneHelper must only be touched when it's installed
     private static final boolean BARITONE = classExists("baritone.api.BaritoneAPI");
 
-    /**
-     * A chest, double chest or barrel. Double chests are one box with both halves as parts.
-     */
-    private static class Box {
-        final BlockPos pos;
-        final List<BlockPos> parts;
-        final List<String> labels = new ArrayList<>();
-        ItemStack[] contents;
-        boolean unreachable;
-        int order;
-
-        Box(BlockPos pos, List<BlockPos> parts) {
-            this.pos = pos;
-            this.parts = parts;
-        }
-
-        boolean known() {
-            return contents != null;
-        }
-
-        int free() {
-            int count = 0;
-            for (ItemStack stack : contents) if (stack.isEmpty()) count++;
-            return count;
-        }
-    }
+    private static final Pattern[] WHISPER_FORMATS = {
+        Pattern.compile("^(\\w{3,16}) whispers(?: to you)?: (.+)$"),
+        Pattern.compile("^From (\\w{3,16}): (.+)$"),
+        Pattern.compile("^\\[(\\w{3,16}) -> (?:me|you)] (.+)$"),
+        Pattern.compile("^(\\w{3,16}) -> (?:me|you): (.+)$")
+    };
 
     private enum Job { Survey, Take, Deposit, Dump }
 
     private enum Step { Walking, Opening, Working }
 
-    private final List<Box> boxes = new ArrayList<>();
-    private final Set<Integer> carrySlots = new HashSet<>();
+    private Stash stash;
+    private String triedKey;
+    private final Set<Integer> carry = new LinkedHashSet<>();
 
     // Tiers mode: which boxes each tier fills
     private final Map<Integer, List<Box>> tierBoxes = new HashMap<>();
@@ -229,45 +334,74 @@ public class StashSorter extends Module {
     private final Set<Box> stalled = new HashSet<>();
     private int actions;
 
+    // Bot mode
+    private boolean idle;
+    private int idleTicks;
+    private int seenVersion;
+    private int version;
+
+    // Containers the player opens themselves
+    private AbstractContainerMenu trackedMenu;
+    private Box trackedBox;
+
+    private final Queue<String> replies = new ArrayDeque<>();
+    private int replyCooldown;
+
     public StashSorter() {
-        super(QwerteAddon.STORAGE, "stash-sorter", "Sorts nearby chests and barrels into tiers, or by the signs on them.");
+        super(QwerteAddon.STORAGE, "stash-sorter", "Sorts a saved stash by tier or by sign, keeps it sorted, and lets you search it.");
+
+        // Always listening: keeping the stash up to date, picking containers and whisper searches all work with the
+        // module off
+        MeteorClient.EVENT_BUS.subscribe(new Tracker());
+        RightClick.listen(this::onRightClick);
     }
+
+    // Turning on and off
 
     @Override
     public void onActivate() {
-        boxes.clear();
-        carrySlots.clear();
-        tierBoxes.clear();
         job = null;
         target = null;
         moved = 0;
         wait = 0;
+        idle = false;
         stalled.clear();
+        tierBoxes.clear();
 
-        // The slots that are empty now are ours to carry items in, everything else is the player's
-        for (int i = 0; i < 36; i++) {
-            if (mc.player.getInventory().getItem(i).isEmpty()) carrySlots.add(i);
-        }
-        if (carrySlots.isEmpty()) {
-            error("Empty at least one inventory slot to carry items in.");
+        if (!pickCarrySlots()) {
             toggle();
             return;
         }
 
-        findBoxes();
-        if (boxes.size() < 2) {
-            error("Found %d container%s within %d blocks, need at least 2 to sort.", boxes.size(), boxes.size() == 1 ? "" : "s", radius.get());
+        boolean existed = ensureStash() != null;
+        if (stash == null) stash = new Stash(stashName.get(), Stash.currentServer());
+
+        int added = addNearbyBoxes();
+        for (Box box : stash.boxes) {
+            box.unreachable = false;
+            readSigns(box);
+        }
+        orderBoxes();
+
+        long sortable = stash.boxes.stream().filter(b -> !b.excluded && !b.dropOff).count();
+        if (sortable < 2) {
+            error("Found %d container%s to sort within %d blocks, need at least 2.", sortable, sortable == 1 ? "" : "s", radius.get());
             toggle();
             return;
         }
 
-        if (mode.get() == Mode.Signs && boxes.stream().allMatch(b -> b.labels.isEmpty())) {
+        if (mode.get() == Mode.Signs && stash.boxes.stream().allMatch(b -> b.labels.isEmpty())) {
             error("None of the containers have signs on them. Put signs on them, or use Tiers mode.");
             toggle();
             return;
         }
 
-        info("Sorting %d containers by %s, carrying items in %d free slots.", boxes.size(), mode.get() == Mode.Tiers ? "tier" : "sign", carrySlots.size());
+        int unknown = stash.boxes.size() - stash.knownCount();
+        if (!existed) info("New stash \"%s\": scanning %d containers, then sorting.", stash.name, stash.boxes.size());
+        else if (unknown > 0) info("Stash \"%s\": %d containers, scanning %d new ones first.", stash.name, stash.boxes.size(), unknown);
+        else info("Stash \"%s\": %d containers, sorting by %s.", stash.name, stash.boxes.size(), mode.get() == Mode.Tiers ? "tier" : "sign");
+
+        if (added > 0) stash.save();
     }
 
     @Override
@@ -280,19 +414,82 @@ public class StashSorter extends Module {
             usedBaritone = false;
         }
 
-        if (mc.player != null && carriedSlots().size() > 0) {
+        if (stash != null && stash.isDirty()) stash.save();
+
+        if (mc.player != null && !carriedSlots().isEmpty()) {
             warning("Stopped while carrying %d stacks from the stash, they're in your inventory.", carriedSlots().size());
         }
+
+        job = null;
+        target = null;
     }
+
+    /**
+     * Works out which slots to carry stash items in, from the settings or, by default, every empty slot.
+     */
+    private boolean pickCarrySlots() {
+        carry.clear();
+        Set<Integer> keep = parseSlots(keepSlots.get());
+        Set<Integer> chosen = parseSlots(carrySlots.get());
+        boolean designated = !carrySlots.get().isBlank();
+
+        for (int i = 0; i < 36; i++) {
+            if (keep.contains(i)) continue;
+            if (designated && !chosen.contains(i)) continue;
+            if (mc.player.getInventory().getItem(i).isEmpty()) carry.add(i);
+        }
+
+        if (designated && carry.size() < chosen.size()) {
+            warning("%d of your carry-slots have items in them, they'll be left alone.", chosen.size() - carry.size());
+        }
+
+        if (carry.isEmpty()) {
+            error(designated ? "Your carry-slots are all full. Empty at least one of them." : "Empty at least one inventory slot to carry items in.");
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * "1-9, 28-36" into inventory indexes. 1-9 is the hotbar and 10-36 the main inventory, matching index + 1.
+     */
+    private static Set<Integer> parseSlots(String text) {
+        Set<Integer> slots = new HashSet<>();
+        for (String part : text.split(",")) {
+            part = part.trim();
+            if (part.isEmpty()) continue;
+            try {
+                String[] range = part.split("-");
+                int from = Integer.parseInt(range[0].trim());
+                int to = range.length > 1 ? Integer.parseInt(range[1].trim()) : from;
+                for (int n = Math.max(1, Math.min(from, to)); n <= Math.min(36, Math.max(from, to)); n++) slots.add(n - 1);
+            } catch (NumberFormatException ignored) {
+                // Skip anything that isn't a number or range
+            }
+        }
+        return slots;
+    }
+
+    // The sorting loop
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
+        if (stash == null) {
+            toggle();
+            return;
+        }
+
         if (wait > 0) {
             wait--;
             return;
         }
 
-        if (job == null && !nextJob()) return;
+        if (job == null) {
+            // Never start while a container is open, it might be one the player is using
+            if (mc.player.containerMenu != mc.player.inventoryMenu) return;
+            if (idle && !wakeUp()) return;
+            if (!nextJob()) return;
+        }
         stepTicks++;
 
         switch (step) {
@@ -302,15 +499,44 @@ public class StashSorter extends Module {
         }
     }
 
-    // Choosing what to do next
+    /**
+     * Bot mode, waiting for something to sort: a container that changed, or a drop-off due for a check.
+     */
+    private boolean wakeUp() {
+        idleTicks++;
+
+        if (idleTicks >= recheck.get() * 20) {
+            idleTicks = 0;
+            boolean any = false;
+            for (Box box : stash.boxes) {
+                if (box.dropOff && !box.unreachable) {
+                    box.contents = null;
+                    any = true;
+                }
+            }
+            if (any) {
+                idle = false;
+                return true;
+            }
+        }
+
+        if (version != seenVersion) {
+            seenVersion = version;
+            stalled.clear();
+            idle = false;
+            return true;
+        }
+
+        return false;
+    }
 
     /**
-     * Picks the next job. Read every container first, then put away what we're carrying, then pick up what's in the
-     * wrong place.
+     * Picks the next job. Read every container we don't know yet, then put away what we're carrying, then pick up
+     * what's in the wrong place.
      * @return false when there's nothing left to do
      */
     private boolean nextJob() {
-        Box unread = nearest(boxes.stream().filter(b -> !b.known() && !b.unreachable).toList());
+        Box unread = nearest(stash.boxes.stream().filter(b -> !b.known() && !b.unreachable).toList());
         if (unread != null) return start(Job.Survey, unread);
 
         plan();
@@ -328,7 +554,7 @@ public class StashSorter extends Module {
             if (place != null) return start(Job.Deposit, place);
 
             // Nowhere it belongs has room: put it down anywhere with space rather than walk around holding it
-            Box spare = nearest(boxes.stream().filter(b -> b.known() && !b.unreachable && b.free() > 0 && !stalled.contains(b)).toList());
+            Box spare = nearest(stash.boxes.stream().filter(b -> b.sortable() && !b.dropOff && b.free() > 0 && !stalled.contains(b)).toList());
             if (spare != null) return start(Job.Dump, spare);
 
             warning("Found nowhere with room for what I'm carrying, stopping. You have %d stacks from the stash in your inventory.", carried.size());
@@ -336,14 +562,30 @@ public class StashSorter extends Module {
             return false;
         }
 
-        Box source = nearest(boxes.stream().filter(b -> b.known() && !b.unreachable && !stalled.contains(b) && hasTakeable(b)).toList());
+        Box source = nearest(stash.boxes.stream().filter(b -> b.sortable() && !stalled.contains(b) && takeableSlot(b) != -1).toList());
         if (source != null) return start(Job.Take, source);
 
-        long unreachable = boxes.stream().filter(b -> b.unreachable).count();
-        if (unreachable > 0) info("Done, moved %d stacks. Couldn't open %d containers, they were left alone.", moved, unreachable);
-        else info("Done, moved %d stacks.", moved);
-        toggle();
+        finishSorting();
         return false;
+    }
+
+    private void finishSorting() {
+        if (stash.isDirty()) stash.save();
+
+        long unreachable = stash.boxes.stream().filter(b -> b.unreachable).count();
+        String extra = unreachable > 0 ? String.format(" Couldn't open %d containers, they were left alone.", unreachable) : "";
+
+        if (stayOn.get()) {
+            if (moved > 0 || !idle) info("Sorted, moved %d stacks.%s Waiting for more to sort.", moved, extra);
+            moved = 0;
+            idle = true;
+            idleTicks = 0;
+            seenVersion = version;
+            return;
+        }
+
+        info("Done, moved %d stacks.%s", moved, extra);
+        toggle();
     }
 
     private boolean start(Job next, Box box) {
@@ -364,6 +606,7 @@ public class StashSorter extends Module {
         else {
             box.unreachable = true;
             job = null;
+            target = null;
             return false;
         }
 
@@ -380,6 +623,7 @@ public class StashSorter extends Module {
             else stalled.clear();
         }
 
+        if (stash.isDirty()) stash.save();
         job = null;
         target = null;
         wait = delay.get();
@@ -440,9 +684,9 @@ public class StashSorter extends Module {
 
         boolean busy = switch (job) {
             case Survey -> false;
-            case Take -> takeOne(menu);
-            case Deposit -> depositOne(menu);
-            case Dump -> dumpOne(menu);
+            case Take -> takeOne();
+            case Deposit -> depositOne();
+            case Dump -> dumpOne();
         };
 
         if (busy) {
@@ -455,17 +699,18 @@ public class StashSorter extends Module {
     // Moving items
 
     /**
-     * Takes one stack that belongs somewhere else, if there's somewhere for it to go.
-     * @return false when there's nothing more to take
+     * Moves one stack that belongs somewhere else into a free carry slot.
+     * @return false when there's nothing more to take, or nowhere to carry it
      */
-    private boolean takeOne(AbstractContainerMenu menu) {
-        refreshCarrySlots();
-        if (freeCarrySlots() == 0) return false;
+    private boolean takeOne() {
+        int into = freeCarrySlot();
+        if (into == -1) return false;
 
         int slot = takeableSlot(target);
         if (slot == -1) return false;
 
-        InvUtils.shiftClick().slotId(slot);
+        // Straight into a carry slot, so it can never land in or top up one of the player's own stacks
+        InvUtils.move().fromId(slot).toId(inventoryToMenu(into, target.contents.length));
         return true;
     }
 
@@ -476,8 +721,8 @@ public class StashSorter extends Module {
     private int takeableSlot(Box source) {
         // What each destination can still take, so we don't pick up more than we can put away
         Map<Box, Integer> room = new HashMap<>();
-        for (Box box : boxes) {
-            if (box.known() && !box.unreachable && box != source) room.put(box, box.free() + misplacedCount(box));
+        for (Box box : stash.boxes) {
+            if (box.sortable() && !box.dropOff && box != source) room.put(box, box.free() + misplacedCount(box));
         }
         for (int carried : carriedSlots()) {
             for (Box box : destinationsFor(mc.player.getInventory().getItem(carried))) {
@@ -490,15 +735,11 @@ public class StashSorter extends Module {
 
         for (int i = 0; i < source.contents.length; i++) {
             ItemStack stack = source.contents[i];
-            if (stack.isEmpty() || !misplaced(stack, source) || wouldMergeIntoPlayer(stack)) continue;
+            if (stack.isEmpty() || !misplaced(stack, source)) continue;
             if (destinationsFor(stack).stream().anyMatch(b -> room.getOrDefault(b, 0) > 0)) return i;
         }
 
         return -1;
-    }
-
-    private boolean hasTakeable(Box box) {
-        return takeableSlot(box) != -1;
     }
 
     /**
@@ -506,7 +747,7 @@ public class StashSorter extends Module {
      * that belongs elsewhere instead, so full containers can still be sorted.
      * @return false when nothing more can be put here
      */
-    private boolean depositOne(AbstractContainerMenu menu) {
+    private boolean depositOne() {
         int size = target.contents.length;
 
         // Mid-swap: carried stack on the cursor, then into the slot, then what was there back into the carry slot
@@ -547,7 +788,7 @@ public class StashSorter extends Module {
     /**
      * Puts carried stacks down in a container with space, when nowhere they belong has room for them.
      */
-    private boolean dumpOne(AbstractContainerMenu menu) {
+    private boolean dumpOne() {
         for (int slot : carriedSlots()) {
             if (!canFit(mc.player.getInventory().getItem(slot))) continue;
 
@@ -565,19 +806,6 @@ public class StashSorter extends Module {
         return false;
     }
 
-    /**
-     * Shift-clicking this out of a container would top up one of the player's own stacks instead of landing in a
-     * carry slot, mixing stash items into the player's things.
-     */
-    private boolean wouldMergeIntoPlayer(ItemStack stack) {
-        for (int i = 0; i < 36; i++) {
-            if (carrySlots.contains(i)) continue;
-            ItemStack own = mc.player.getInventory().getItem(i);
-            if (ItemStack.isSameItemSameComponents(own, stack) && own.getCount() < own.getMaxStackSize()) return true;
-        }
-        return false;
-    }
-
     // Planning
 
     /**
@@ -587,11 +815,12 @@ public class StashSorter extends Module {
         tierBoxes.clear();
         if (mode.get() != Mode.Tiers) return;
 
-        List<Box> ordered = boxes.stream().filter(b -> b.known() && !b.unreachable).sorted(Comparator.comparingInt(b -> b.order)).toList();
+        List<Box> ordered = stash.boxes.stream().filter(b -> b.sortable() && !b.dropOff).sorted(Comparator.comparingInt(b -> b.order)).toList();
 
-        // How many stacks of each tier there are, carried ones included
+        // How many stacks of each tier there are, including drop-offs and what we're carrying
         int[] counts = new int[5];
-        for (Box box : ordered) {
+        for (Box box : stash.boxes) {
+            if (!box.sortable()) continue;
             for (ItemStack stack : box.contents) if (!stack.isEmpty()) counts[tier(stack)]++;
         }
         for (int slot : carriedSlots()) counts[tier(mc.player.getInventory().getItem(slot))]++;
@@ -624,7 +853,7 @@ public class StashSorter extends Module {
 
     /**
      * Where a stack should go: the boxes it belongs in, all equally good. Empty if it doesn't belong anywhere in
-     * particular, in which case it's left where it is.
+     * particular, in which case it's left where it is. Never an excluded or drop-off container.
      */
     private List<Box> destinationsFor(ItemStack stack) {
         if (stack.isEmpty()) return List.of();
@@ -633,10 +862,12 @@ public class StashSorter extends Module {
 
         int best = 0;
         List<Box> result = new ArrayList<>();
-        for (Box box : boxes) {
-            if (!box.known() || box.unreachable) continue;
+        for (Box box : stash.boxes) {
+            if (!box.sortable() || box.dropOff) continue;
 
-            int score = labelScore(box, stack);
+            int score = 0;
+            for (String label : box.labels) score = Math.max(score, Categories.signScore(label, stack));
+
             if (score > best) {
                 best = score;
                 result.clear();
@@ -646,6 +877,10 @@ public class StashSorter extends Module {
         return result;
     }
 
+    /**
+     * In the wrong place: everything in a drop-off that has somewhere to go, or anything in a container it doesn't
+     * belong in.
+     */
     private boolean misplaced(ItemStack stack, Box box) {
         List<Box> places = destinationsFor(stack);
         return !places.isEmpty() && !places.contains(box);
@@ -657,126 +892,75 @@ public class StashSorter extends Module {
         return count;
     }
 
-    // Tiers
-
     /**
      * 0 filled shulkers, 1 empty shulkers, 2 stacks to 64, 3 stacks to 16, 4 everything else.
      */
     private static int tier(ItemStack stack) {
-        if (Utils.isShulker(stack.getItem())) return hasContents(stack) ? 0 : 1;
+        if (Utils.isShulker(stack.getItem())) {
+            ItemStack[] contents = new ItemStack[27];
+            Utils.getItemsInContainerItem(stack, contents);
+            for (ItemStack s : contents) if (s != null && !s.isEmpty()) return 0;
+            return 1;
+        }
         if (stack.getMaxStackSize() == 64) return 2;
         if (stack.getMaxStackSize() == 16) return 3;
         return 4;
     }
 
-    private static boolean hasContents(ItemStack shulker) {
-        ItemStack[] contents = new ItemStack[27];
-        Utils.getItemsInContainerItem(shulker, contents);
-        for (ItemStack stack : contents) if (stack != null && !stack.isEmpty()) return true;
-        return false;
-    }
-
-    // Signs
-
-    private static final Set<String> CATCH_ALL = Set.of("misc", "other", "others", "*", "overflow", "everything", "junk", "random");
+    // Containers and signs
 
     /**
-     * How well a container's signs describe an item: an exact name beats matching words, which beat a category,
-     * which beats a catch-all. 0 means the signs don't describe it at all.
+     * Adds containers around us that aren't in the stash yet, and drops ones that have been broken.
+     * @return how many were added
      */
-    private static int labelScore(Box box, ItemStack stack) {
-        int best = 0;
-        for (String label : box.labels) best = Math.max(best, lineScore(label, stack));
-        return best;
-    }
-
-    private static int lineScore(String line, ItemStack stack) {
-        String name = normalize(stack.getHoverName().getString());
-        String id = normalize(BuiltInRegistries.ITEM.getKey(stack.getItem()).getPath());
-        String label = normalize(line);
-
-        if (label.equals(name) || label.equals(id)) return 100;
-
-        if (category(label, stack)) return 30;
-        if (CATCH_ALL.contains(label)) return 1;
-
-        Set<String> words = new HashSet<>();
-        for (String word : (name + " " + id).split(" ")) if (!word.isEmpty()) words.add(singular(word));
-
-        boolean all = true;
-        for (String word : label.split(" ")) {
-            if (!word.isEmpty() && !words.contains(singular(word))) {
-                all = false;
-                break;
-            }
-        }
-        return all && !label.isEmpty() ? 50 : 0;
-    }
-
-    private static boolean category(String label, ItemStack stack) {
-        return switch (label) {
-            case "shulker", "shulkers", "shulker box", "shulker boxes" -> Utils.isShulker(stack.getItem());
-            case "food", "foods" -> stack.has(DataComponents.FOOD);
-            case "tool", "tools" -> stack.is(ItemTags.PICKAXES) || stack.is(ItemTags.AXES) || stack.is(ItemTags.SHOVELS) || stack.is(ItemTags.HOES);
-            case "weapon", "weapons" -> stack.is(ItemTags.SWORDS) || stack.is(ItemTags.AXES);
-            case "armor", "armour" -> stack.has(DataComponents.EQUIPPABLE);
-            case "block", "blocks" -> stack.getItem() instanceof BlockItem;
-            case "log", "logs", "wood" -> stack.is(ItemTags.LOGS);
-            case "stackable", "stackables", "x64", "64" -> stack.getMaxStackSize() == 64;
-            case "x16", "16" -> stack.getMaxStackSize() == 16;
-            case "single", "singles", "unstackable", "unstackables", "x1" -> stack.getMaxStackSize() == 1;
-            default -> false;
-        };
-    }
-
-    private static String normalize(String text) {
-        return text.toLowerCase(Locale.ROOT).replace('_', ' ').replaceAll("[^a-z0-9* ]", "").replaceAll("\\s+", " ").trim();
-    }
-
-    private static String singular(String word) {
-        if (word.length() > 4 && word.endsWith("es") && !word.endsWith("ses")) return word.substring(0, word.length() - 2);
-        if (word.length() > 3 && word.endsWith("s") && !word.endsWith("ss")) return word.substring(0, word.length() - 1);
-        return word;
-    }
-
-    // Finding containers
-
-    private void findBoxes() {
+    private int addNearbyBoxes() {
         BlockPos center = mc.player.blockPosition();
         int r = radius.get(), h = height.get();
-        Map<BlockPos, Box> byPart = new HashMap<>();
+        int added = 0;
+
+        if (stash.boxes.removeIf(box -> mc.level.isLoaded(box.pos) && !isContainer(box.pos))) stash.markDirty();
 
         for (BlockPos p : BlockPos.betweenClosed(center.offset(-r, -h, -r), center.offset(r, h, r))) {
-            BlockEntity entity = mc.level.getBlockEntity(p);
-            boolean chest = entity instanceof ChestBlockEntity;
-            if (!chest && !(barrels.get() && entity instanceof BarrelBlockEntity)) continue;
-
-            BlockPos pos = p.immutable();
-            if (byPart.containsKey(pos)) continue;
-
-            List<BlockPos> parts = new ArrayList<>(List.of(pos));
-            BlockState state = mc.level.getBlockState(pos);
-            if (chest && state.hasProperty(ChestBlock.TYPE) && state.getValue(ChestBlock.TYPE) != ChestType.SINGLE) {
-                parts.add(pos.relative(ChestBlock.getConnectedDirection(state)));
-            }
-
-            Box box = new Box(pos, parts);
-            for (BlockPos part : parts) byPart.put(part, box);
-            readSigns(box);
-            boxes.add(box);
+            if (!isContainer(p) || stash.boxAt(p) != null) continue;
+            stash.boxes.add(makeBox(p.immutable()));
+            added++;
         }
 
+        if (added > 0) stash.markDirty();
+        return added;
+    }
+
+    private boolean isContainer(BlockPos pos) {
+        BlockEntity entity = mc.level.getBlockEntity(pos);
+        return entity instanceof ChestBlockEntity || (barrels.get() && entity instanceof BarrelBlockEntity);
+    }
+
+    private Box makeBox(BlockPos pos) {
+        List<BlockPos> parts = new ArrayList<>(List.of(pos));
+        BlockState state = mc.level.getBlockState(pos);
+        if (state.getBlock() instanceof ChestBlock && state.hasProperty(ChestBlock.TYPE) && state.getValue(ChestBlock.TYPE) != ChestType.SINGLE) {
+            parts.add(pos.relative(ChestBlock.getConnectedDirection(state)));
+        }
+        return new Box(pos, parts);
+    }
+
+    private void orderBoxes() {
         // Tiers fill the nearest containers first
         Vec3 start = mc.player.position();
-        boxes.sort(Comparator.<Box>comparingDouble(b -> start.distanceToSqr(Vec3.atCenterOf(b.pos)))
+        List<Box> sorted = new ArrayList<>(stash.boxes);
+        sorted.sort(Comparator.<Box>comparingDouble(b -> start.distanceToSqr(Vec3.atCenterOf(b.pos)))
             .thenComparingInt(b -> b.pos.getY()).thenComparingInt(b -> b.pos.getX()).thenComparingInt(b -> b.pos.getZ()));
-        for (int i = 0; i < boxes.size(); i++) boxes.get(i).order = i;
+        for (int i = 0; i < sorted.size(); i++) sorted.get(i).order = i;
     }
 
     /**
-     * Signs on the side of a container facing away from it, or standing on top of it.
+     * Signs on the side of a container facing away from it, or standing on top of it. Each line is a label, and so
+     * are all the lines of a sign read together, for labels split across lines.
      */
     private void readSigns(Box box) {
+        box.labels.clear();
+        if (!mc.level.isLoaded(box.pos)) return;
+
         for (BlockPos part : box.parts) {
             for (Direction dir : HORIZONTALS) {
                 BlockPos signPos = part.relative(dir);
@@ -793,48 +977,294 @@ public class StashSorter extends Module {
         if (!(mc.level.getBlockEntity(signPos) instanceof SignBlockEntity sign)) return;
 
         for (var text : List.of(sign.getFrontText(), sign.getBackText())) {
+            StringBuilder joined = new StringBuilder();
+            int lines = 0;
             for (int i = 0; i < 4; i++) {
                 String line = text.getMessage(i, false).getString().trim();
-                if (!line.isEmpty()) box.labels.add(line);
+                if (line.isEmpty()) continue;
+                box.labels.add(line);
+                if (!joined.isEmpty()) joined.append(' ');
+                joined.append(line);
+                lines++;
+            }
+            if (lines > 1) box.labels.add(joined.toString());
+        }
+    }
+
+    // Picking containers
+
+    /**
+     * @return true when picking, so the click doesn't open the container
+     */
+    private boolean onRightClick() {
+        if (pick.get() == Pick.Off) return false;
+        if (mc.player == null || mc.level == null || !mc.mouseHandler.isMouseGrabbed()) return false;
+        if (!(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return false;
+
+        BlockPos pos = hit.getBlockPos();
+        if (!isContainer(pos)) {
+            warning("That isn't a chest or barrel.");
+            return true;
+        }
+
+        if (ensureStash() == null) stash = new Stash(stashName.get(), Stash.currentServer());
+        Box box = stash.boxAt(pos);
+        if (box == null) {
+            box = makeBox(pos.immutable());
+            stash.boxes.add(box);
+        }
+
+        if (pick.get() == Pick.Exclude) {
+            box.excluded = !box.excluded;
+            box.dropOff = false;
+            info(box.excluded ? "%s won't be sorted." : "%s will be sorted again.", box.pos.toShortString());
+        }
+        else {
+            box.dropOff = !box.dropOff;
+            box.excluded = false;
+            info(box.dropOff ? "%s is a drop-off, it'll be emptied into the stash." : "%s is a normal container again.", box.pos.toShortString());
+        }
+
+        stash.save();
+        version++;
+        return true;
+    }
+
+    // The stash, kept up to date
+
+    /**
+     * The stash named in the settings, loaded from disk the first time it's needed on this server.
+     */
+    private Stash ensureStash() {
+        if (mc.level == null) return null;
+
+        String server = Stash.currentServer();
+        if (stash != null && stash.name.equals(stashName.get()) && stash.server.equals(server)) return stash;
+
+        // Only try the disk once per name and server, a missing stash isn't looked for again every tick
+        String key = server + "/" + stashName.get();
+        if (!key.equals(triedKey)) {
+            triedKey = key;
+            stash = Stash.load(stashName.get());
+        }
+        else stash = null;
+
+        return stash;
+    }
+
+    private class Tracker {
+        @EventHandler
+        private void onGameLeft(GameLeftEvent event) {
+            if (stash != null && stash.isDirty()) stash.save();
+            stash = null;
+            triedKey = null;
+            trackedMenu = null;
+            trackedBox = null;
+            replies.clear();
+        }
+
+        @EventHandler
+        private void onTick(TickEvent.Post event) {
+            if (mc.player == null || mc.level == null) return;
+
+            if (replyCooldown > 0) replyCooldown--;
+            else if (!replies.isEmpty()) {
+                ChatUtils.sendPlayerMsg(replies.poll());
+                replyCooldown = REPLY_GAP_TICKS;
+            }
+
+            if (ensureStash() == null) return;
+
+            // The sorter reads the containers it opens itself
+            if (isActive() && job != null) return;
+
+            AbstractContainerMenu menu = mc.player.containerMenu;
+            if (menu instanceof ChestMenu) {
+                if (menu != trackedMenu) {
+                    trackedMenu = menu;
+                    trackedBox = mc.hitResult instanceof BlockHitResult hit && hit.getType() == HitResult.Type.BLOCK ? stash.boxAt(hit.getBlockPos()) : null;
+                }
+
+                if (trackedBox != null && changed(trackedBox, menu)) {
+                    read(trackedBox);
+                    version++;
+                }
+            }
+            else if (trackedMenu != null) {
+                trackedMenu = null;
+                trackedBox = null;
+                if (stash.isDirty()) stash.save();
+            }
+        }
+
+        @EventHandler
+        private void onMessage(ReceiveMessageEvent event) {
+            if (!whisperSearch.get() || mc.player == null) return;
+
+            String text = event.getMessage().getString().replaceAll("§.", "").trim();
+            for (Pattern format : WHISPER_FORMATS) {
+                Matcher m = format.matcher(text);
+                if (m.matches()) {
+                    onWhisper(m.group(1), m.group(2).trim());
+                    return;
+                }
+            }
+        }
+
+        @EventHandler
+        private void onRender(Render3DEvent event) {
+            if (!render.get() || stash == null) return;
+
+            if (isActive() || pick.get() != Pick.Off) {
+                for (Box box : stash.boxes) {
+                    SettingColor color = box.excluded ? excludedColor.get() : box.dropOff ? dropOffColor.get() : null;
+                    if (color == null) continue;
+                    for (BlockPos part : box.parts) event.renderer.box(part, color, color, shapeMode.get(), 0);
+                }
+            }
+
+            Box working = target;
+            if (isActive() && working != null) {
+                for (BlockPos part : working.parts) event.renderer.box(part, workColor.get(), workColor.get(), shapeMode.get(), 0);
             }
         }
     }
 
-    // Helpers
+    private static boolean changed(Box box, AbstractContainerMenu menu) {
+        int size = menu.slots.size() - 36;
+        if (!box.known() || box.contents.length != size) return true;
+        for (int i = 0; i < size; i++) {
+            if (!ItemStack.matches(box.contents[i], menu.getSlot(i).getItem())) return true;
+        }
+        return false;
+    }
 
     private void read(Box box) {
         AbstractContainerMenu menu = mc.player.containerMenu;
-        int size = menu.slots.size() - 36;
+        if (changed(box, menu)) stash.markDirty();
 
-        box.contents = new ItemStack[size];
-        for (int i = 0; i < size; i++) box.contents[i] = menu.getSlot(i).getItem().copy();
+        int size = menu.slots.size() - 36;
+        ItemStack[] contents = new ItemStack[size];
+        for (int i = 0; i < size; i++) contents[i] = menu.getSlot(i).getItem().copy();
+        box.contents = contents;
     }
+
+    // Searching
+
+    private void onWhisper(String sender, String message) {
+        if (sender.equalsIgnoreCase(mc.player.getName().getString())) return;
+        if (whitelist.get().stream().noneMatch(name -> name.equalsIgnoreCase(sender))) return;
+
+        String query = message;
+        String p = prefix.get().trim();
+        if (!p.isEmpty()) {
+            if (!message.toLowerCase(Locale.ROOT).startsWith(p.toLowerCase(Locale.ROOT) + " ")) return;
+            query = message.substring(p.length()).trim();
+        }
+        if (query.isEmpty() || ensureStash() == null) return;
+
+        List<Stash.Result> results = stash.search(query);
+        if (results.isEmpty()) {
+            replies.add(String.format("/whisper %s Couldn't find %s @ %s", sender, query, stash.name));
+            return;
+        }
+
+        Stash.Result result = results.getFirst();
+        Stash.Spot spot = result.best();
+        BlockPos pos = spot.box().pos;
+        String where = spot.inShulker() ? " (in a shulker)" : "";
+        replies.add(String.format("/whisper %s %s Can be Found At %d, %d, %d @ %s%s",
+            sender, result.sample.getHoverName().getString(), pos.getX(), pos.getY(), pos.getZ(), stash.name, where));
+    }
+
+    @Override
+    public WWidget getWidget(GuiTheme theme) {
+        WVerticalList list = theme.verticalList();
+
+        WLabel status = list.add(theme.label(statusText())).expandX().widget();
+
+        WHorizontalList buttons = list.add(theme.horizontalList()).widget();
+        WButton rescan = buttons.add(theme.button("Rescan")).widget();
+        rescan.tooltip = "Forgets what's in every container, so the next run reads them all again.";
+        rescan.action = () -> {
+            if (ensureStash() == null) return;
+            for (Box box : stash.boxes) box.contents = null;
+            stash.save();
+            status.set(statusText());
+        };
+
+        WButton forget = buttons.add(theme.button("Forget stash")).widget();
+        forget.tooltip = "Deletes the saved stash, including excluded and drop-off marks.";
+        forget.action = () -> {
+            Stash.delete(stashName.get());
+            stash = null;
+            triedKey = null;
+            status.set(statusText());
+        };
+
+        list.add(theme.horizontalSeparator("Search"));
+        WTextBox search = list.add(theme.textBox("")).expandX().widget();
+        WTable results = list.add(theme.table()).expandX().widget();
+        search.action = () -> fillResults(theme, results, search.get());
+
+        return list;
+    }
+
+    private String statusText() {
+        if (mc.level == null) return "Join a server to see its stashes.";
+        if (ensureStash() == null) return String.format("No stash called \"%s\" here yet. Turn the module on to scan one.", stashName.get());
+
+        long excluded = stash.boxes.stream().filter(b -> b.excluded).count();
+        long dropOffs = stash.boxes.stream().filter(b -> b.dropOff).count();
+        return String.format("\"%s\": %d containers (%d read, %d excluded, %d drop-off), %,d items.",
+            stash.name, stash.boxes.size(), stash.knownCount(), excluded, dropOffs, stash.itemCount());
+    }
+
+    private void fillResults(GuiTheme theme, WTable table, String query) {
+        table.clear();
+        if (ensureStash() == null) {
+            table.add(theme.label("No stash loaded."));
+            return;
+        }
+
+        List<Stash.Result> results = stash.search(query);
+        if (results.isEmpty()) {
+            if (!Categories.normalize(query).isEmpty()) table.add(theme.label("Nothing found."));
+            return;
+        }
+
+        for (Stash.Result result : results.subList(0, Math.min(25, results.size()))) {
+            Stash.Spot best = result.best();
+            BlockPos pos = best.box().pos;
+            int more = result.spots.size() - 1;
+
+            table.add(theme.item(result.sample));
+            table.add(theme.label(String.format("%s x%,d", result.sample.getHoverName().getString(), result.total))).expandX();
+            table.add(theme.label(String.format("%d, %d, %d%s%s", pos.getX(), pos.getY(), pos.getZ(),
+                best.inShulker() ? " (shulker)" : "", more > 0 ? String.format(" +%d more", more) : "")));
+
+            WButton view = table.add(theme.button("View")).widget();
+            view.action = () -> ItemPreviewScreen.open(result.sample, result.total, stash.name);
+            table.row();
+        }
+    }
+
+    // Helpers
 
     /**
      * Inventory slots holding stash items we're carrying.
      */
     private List<Integer> carriedSlots() {
         List<Integer> slots = new ArrayList<>();
-        for (int slot : carrySlots) {
+        for (int slot : carry) {
             if (!mc.player.getInventory().getItem(slot).isEmpty()) slots.add(slot);
         }
         return slots;
     }
 
-    private int freeCarrySlots() {
-        int count = 0;
-        for (int slot : carrySlots) if (mc.player.getInventory().getItem(slot).isEmpty()) count++;
-        return count;
-    }
-
-    /**
-     * A slot of the player's that's emptied since we started, say by eating, can carry too. Taking a stack fills
-     * whichever empty slot vanilla picks, so every empty slot has to count as one of ours.
-     */
-    private void refreshCarrySlots() {
-        for (int i = 0; i < 36; i++) {
-            if (mc.player.getInventory().getItem(i).isEmpty()) carrySlots.add(i);
-        }
+    private int freeCarrySlot() {
+        for (int slot : carry) if (mc.player.getInventory().getItem(slot).isEmpty()) return slot;
+        return -1;
     }
 
     /**
@@ -870,15 +1300,6 @@ public class StashSorter extends Module {
             return true;
         } catch (ClassNotFoundException e) {
             return false;
-        }
-    }
-
-    @EventHandler
-    private void onRender(Render3DEvent event) {
-        if (!render.get() || target == null) return;
-
-        for (BlockPos part : target.parts) {
-            event.renderer.box(part, sideColor.get(), lineColor.get(), shapeMode.get(), 0);
         }
     }
 }
