@@ -48,7 +48,7 @@ import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
-public class AutoTill extends Module {
+public class AutoTill extends Module implements Restocker.Owner {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgPlanting = settings.createGroup("Planting");
     private final SettingGroup sgWater = settings.createGroup("Water");
@@ -294,6 +294,24 @@ public class AutoTill extends Module {
         .build()
     );
 
+    private final Setting<Boolean> combineTrips = sgAutomation.add(new BoolSetting.Builder()
+        .name("combine-trips")
+        .description("Restocks seeds on the way back from refilling water, and refills empty buckets on the way back from restocking seeds.")
+        .defaultValue(true)
+        .visible(autoWalk::get)
+        .build()
+    );
+
+    private final Setting<Integer> topUpAt = sgAutomation.add(new IntSetting.Builder()
+        .name("seed-top-up-at")
+        .description("When combining trips, restocks seeds on a water trip if you have fewer than this many.")
+        .defaultValue(128)
+        .range(1, 2304)
+        .sliderRange(1, 576)
+        .visible(() -> autoWalk.get() && combineTrips.get() && autoPlant.get() && seedRestock.get())
+        .build()
+    );
+
     // Safety
 
     private final Setting<Boolean> antiBreak = sgSafety.add(new BoolSetting.Builder()
@@ -404,9 +422,12 @@ public class AutoTill extends Module {
 
     private static final int RESTOCK_RETRY_TICKS = 20 * 60;
 
-    private final SeedRestocker restocker = new SeedRestocker(this);
+    private final Restocker restocker = new Restocker(this, this::isSeed, "seeds");
     private boolean restockUnavailable;
     private int restockRetryTicks;
+
+    // What this trip has already been out for, so a combined trip doesn't go round in circles
+    private boolean seedsThisTrip, waterThisTrip;
 
     public enum RefillSource {
         NearestPool("Nearest Pool"),
@@ -785,7 +806,8 @@ public class AutoTill extends Module {
         if (doSwapBack) InvUtils.swapBack();
     }
 
-    boolean rotates() {
+    @Override
+    public boolean rotates() {
         return rotate.get();
     }
 
@@ -1093,7 +1115,7 @@ public class AutoTill extends Module {
                 }
                 else {
                     blockRestock("Couldn't reach the seed storage at %s.", seedStorage.get().toShortString());
-                    goBack();
+                    nextErrand();
                 }
             }
             default -> endTrip();
@@ -1106,42 +1128,49 @@ public class AutoTill extends Module {
         return autoPlant.get() && seedRestock.get() && restockMode.get() == RestockMode.Storage;
     }
 
-    private void startRestock() {
+    /**
+     * @return true if a restock started, either here or with a walk to the storage
+     */
+    private boolean startRestock() {
+        seedsThisTrip = true;
+
         if (restockMode.get() == RestockMode.EnderChest) {
             String problem = restocker.startEnderChest();
             if (problem != null) {
-                blockRestock(problem);
-                return;
+                restockFailed(problem);
+                return false;
             }
 
             startRestockingHere();
-            return;
+            return true;
         }
 
         BlockPos storage = seedStorage.get();
         if (storage.equals(BlockPos.ZERO)) {
             blockRestock("No seed storage set, use pick-storage or enter its coordinates.");
-            return;
+            return false;
         }
 
         if (inReach(storage)) {
             restocker.startManual(storage);
             startRestockingHere();
-            return;
+            return true;
         }
 
         if (!walking()) {
             blockRestock("The seed storage at %s is out of reach, turn on auto-walk to walk there.", storage.toShortString());
-            return;
+            return false;
         }
 
-        returnPos = mc.player.blockPosition();
+        // On a combined trip, we still head back to where the first errand started from
+        if (returnPos == null) returnPos = mc.player.blockPosition();
         goTo(storage, 2, State.GoingToStorage);
+        return true;
     }
 
     private void startRestockingHere() {
         // Restocking swaps items around, so put back what we were holding afterwards like after a walk
-        slotBeforeTrip = mc.player.getInventory().getSelectedSlot();
+        if (slotBeforeTrip < 0) slotBeforeTrip = mc.player.getInventory().getSelectedSlot();
         state = State.Restocking;
         stateTicks = 0;
     }
@@ -1152,17 +1181,53 @@ public class AutoTill extends Module {
             case Done -> {
                 int seedCount = InvUtils.find(this::isSeed).count();
 
-                // Restocking goes first now, so a storage that's run dry would otherwise send us straight back
-                if (seedCount <= restockAt.get()) blockRestock("Restocked, but you only have %d seeds. Is the storage running low?", seedCount);
+                if (restocker.sourceEmpty()) {
+                    warning("Restocked to %d seeds, but that emptied your %s. Turning off seed-restock.", seedCount, sourceName());
+                    seedRestock.set(false);
+                }
+                // Restocking goes first, so a storage that's run dry would otherwise send us straight back
+                else if (seedCount <= restockAt.get()) blockRestock("Restocked, but you only have %d seeds. Is the storage running low?", seedCount);
                 else info("Restocked seeds, you now have %d.", seedCount);
 
-                goBack();
+                nextErrand();
             }
             case Failed -> {
-                blockRestock(restocker.failure());
-                goBack();
+                restockFailed(restocker.failure());
+                nextErrand();
             }
         }
+    }
+
+    /**
+     * A storage seen to be empty turns restocking off, anything else only pauses it for a while.
+     */
+    private void restockFailed(String reason) {
+        if (restocker.sourceEmpty()) {
+            error("%s Turning off seed-restock.", reason);
+            seedRestock.set(false);
+        }
+        else blockRestock(reason);
+    }
+
+    private String sourceName() {
+        return restockMode.get() == RestockMode.EnderChest ? "ender chest's seed shulkers" : "seed storage";
+    }
+
+    /**
+     * Called whenever an errand ends. With combine-trips on and while we're away from the field, does the other
+     * errand before heading back.
+     */
+    private void nextErrand() {
+        if (returnPos != null && walking() && combineTrips.get()) {
+            if (!seedsThisTrip && wantsSeedTopUp() && startRestock()) return;
+            if (!waterThisTrip && autoWater.get() && canRefill() && startRefill()) return;
+        }
+
+        goBack();
+    }
+
+    private boolean wantsSeedTopUp() {
+        return autoPlant.get() && seedRestock.get() && !restockUnavailable && InvUtils.find(this::isSeed).count() < topUpAt.get();
     }
 
     /**
@@ -1243,6 +1308,8 @@ public class AutoTill extends Module {
      * Back to working in place, holding whatever we held before Baritone took over.
      */
     private void endTrip() {
+        seedsThisTrip = waterThisTrip = false;
+
         if (state != State.Working && slotBeforeTrip >= 0 && mc.player != null
             && mc.player.getInventory().getSelectedSlot() != slotBeforeTrip) {
             InvUtils.swap(slotBeforeTrip, false);
@@ -1254,6 +1321,7 @@ public class AutoTill extends Module {
 
     private void goBack() {
         pool = null;
+        seedsThisTrip = waterThisTrip = false;
         if (returnPos != null) goTo(returnPos, 1, State.Returning);
         else endTrip();
         returnPos = null;
@@ -1300,26 +1368,29 @@ public class AutoTill extends Module {
 
     // Refilling
 
-    private void startRefill() {
-        returnPos = mc.player.blockPosition();
+    /**
+     * @return true if we set off for water
+     */
+    private boolean startRefill() {
+        waterThisTrip = true;
 
         if (usingStation()) {
             if (station.get().equals(BlockPos.ZERO)) {
                 blockRefill("No refill station set, tilling dry land without water for now.");
-                returnPos = null;
-                return;
+                return false;
             }
 
             // A far away station may not be loaded yet, its water is checked once we get there
             pool = mc.level.isLoaded(station.get()) ? stationPool() : null;
             if (pool != null && pool.isEmpty()) {
                 blockRefill("Refill station at %s isn't water, tilling dry land without water for now.", station.get().toShortString());
-                returnPos = null;
-                return;
+                return false;
             }
 
+            // On a combined trip, we still head back to where the first errand started from
+            if (returnPos == null) returnPos = mc.player.blockPosition();
             goToWater(station.get());
-            return;
+            return true;
         }
 
         BlockPos corner = findPoolCorner();
@@ -1327,13 +1398,14 @@ public class AutoTill extends Module {
 
         if (corner == null) {
             blockRefill("No 4x4 water source within %d blocks, tilling dry land without water for now.", waterSearchRadius.get());
-            returnPos = null;
-            return;
+            return false;
         }
 
+        if (returnPos == null) returnPos = mc.player.blockPosition();
         poolCorner = corner;
         pool = mc.level.isLoaded(corner) ? squareAt(corner) : null;
         goToWater(corner);
+        return true;
     }
 
     /**
@@ -1379,7 +1451,7 @@ public class AutoTill extends Module {
     private void failPool() {
         if (usingStation()) {
             blockRefill("Couldn't refill at the station at %s, tilling dry land without water for now.", station.get().toShortString());
-            goBack();
+            nextErrand();
             return;
         }
 
@@ -1396,7 +1468,7 @@ public class AutoTill extends Module {
         }
 
         blockRefill("Couldn't reach any 4x4 water source, tilling dry land without water for now.");
-        goBack();
+        nextErrand();
     }
 
     /**
@@ -1552,7 +1624,7 @@ public class AutoTill extends Module {
         moveToHotbar(Items.BUCKET);
         if (!findItem(stack -> stack.is(Items.BUCKET)).found() || stateTicks > FILL_TIMEOUT_TICKS) {
             warnedNoBucket = false;
-            goBack();
+            nextErrand();
             return;
         }
 
@@ -1667,7 +1739,8 @@ public class AutoTill extends Module {
         moveToHotbar(stack -> stack.is(item));
     }
 
-    void moveToHotbar(Predicate<ItemStack> predicate) {
+    @Override
+    public void moveToHotbar(Predicate<ItemStack> predicate) {
         if (!autoSwitch.get() || InvUtils.findInHotbar(predicate).found()) return;
 
         FindItemResult result = InvUtils.find(predicate);

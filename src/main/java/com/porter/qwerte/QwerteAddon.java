@@ -1,6 +1,7 @@
 package com.porter.qwerte;
 
 import com.mojang.logging.LogUtils;
+import com.porter.qwerte.modules.AutoDirt;
 import com.porter.qwerte.modules.AutoTill;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -18,6 +19,7 @@ public class QwerteAddon extends MeteorAddon {
 
         // Modules
         Modules.get().add(new AutoTill());
+        Modules.get().add(new AutoDirt());
     }
 
     @Override

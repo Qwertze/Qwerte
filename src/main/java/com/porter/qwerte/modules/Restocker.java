@@ -30,15 +30,24 @@ import java.util.function.Predicate;
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
- * Restocks seeds for {@link AutoTill}, either from a storage block the player picked, or from a shulker kept in their
- * ender chest. Runs one small step per tick while the player stands still; travelling is left to AutoTill.
+ * Restocks an item for a module, either from a storage block the player picked, or from a shulker kept in their ender
+ * chest. Runs one small step per tick while the player stands still; travelling is left to the module.
  */
-class SeedRestocker {
+class Restocker {
     enum Result { Busy, Done, Failed }
+
+    /**
+     * What the restocker needs from the module using it.
+     */
+    interface Owner {
+        boolean rotates();
+
+        void moveToHotbar(Predicate<ItemStack> predicate);
+    }
 
     private enum Step {
         OpenStorage, TakeFromStorage,
-        PlaceEChest, OpenEChest, TakeShulker, PlaceShulker, OpenShulker, TakeSeeds, BreakShulker, CollectShulker,
+        PlaceEChest, OpenEChest, TakeShulker, PlaceShulker, OpenShulker, TakeItems, BreakShulker, CollectShulker,
         ReopenEChest, ReturnShulker, BreakEChest, CollectEChest
     }
 
@@ -49,7 +58,9 @@ class SeedRestocker {
     private static final int COLLECT_TIMEOUT = 20 * 5;
     private static final int CLICK_DELAY = 2;
 
-    private final AutoTill module;
+    private final Owner module;
+    private final Predicate<ItemStack> wanted;
+    private final String what;
 
     private Step step;
     private int stepTicks;
@@ -60,14 +71,32 @@ class SeedRestocker {
     private BlockPos echestSpot, shulkerSpot;
     private int shulkerSlot = -1;
     private Item shulkerItem;
+    private int startCount;
     private int echestCount, shulkerCount;
 
-    SeedRestocker(AutoTill module) {
+    // How many wanted items are left in the source once we're done, -1 while unknown
+    private int sourceLeft;
+    private int othersLeft;
+
+    /**
+     * @param wanted the items to restock
+     * @param what   what to call them in messages, like "seeds"
+     */
+    Restocker(Owner module, Predicate<ItemStack> wanted, String what) {
         this.module = module;
+        this.wanted = wanted;
+        this.what = what;
     }
 
     String failure() {
         return failure;
+    }
+
+    /**
+     * True once we've seen that the storage, or every shulker in the ender chest, has none of the items left.
+     */
+    boolean sourceEmpty() {
+        return sourceLeft == 0;
     }
 
     /**
@@ -80,7 +109,7 @@ class SeedRestocker {
     }
 
     /**
-     * Restock from a seed shulker kept in the ender chest.
+     * Restock from a shulker kept in the ender chest.
      * @return a reason it can't start, or null if it started
      */
     String startEnderChest() {
@@ -92,7 +121,8 @@ class SeedRestocker {
 
         // Meteor remembers what was in the ender chest last time it was opened, check that before placing anything
         if (EChestMemory.isKnown() && bestShulkerIn(EChestMemory.ITEMS::get, EChestMemory.ITEMS.size()) == -1) {
-            return "No shulker with your selected seeds in your ender chest.";
+            sourceLeft = 0;
+            return "No shulker with " + what + " in your ender chest.";
         }
 
         echestSpot = findSpot(null);
@@ -113,9 +143,9 @@ class SeedRestocker {
         return switch (step) {
             case OpenStorage -> {
                 if (open(storage, menu -> menu != mc.player.inventoryMenu)) go(Step.TakeFromStorage);
-                yield timedOut(OPEN_TIMEOUT) ? fail("Couldn't open the seed storage.") : Result.Busy;
+                yield timedOut(OPEN_TIMEOUT) ? fail("Couldn't open the " + what + " storage.") : Result.Busy;
             }
-            case TakeFromStorage -> takeSeeds(0) ? Result.Busy : finishStorage();
+            case TakeFromStorage -> takeItems(0) ? Result.Busy : finishStorage();
 
             case PlaceEChest -> {
                 if (mc.level.getBlockState(echestSpot).is(Blocks.ENDER_CHEST)) go(Step.OpenEChest);
@@ -138,16 +168,17 @@ class SeedRestocker {
                 yield Result.Busy;
             }
             case OpenShulker -> {
-                if (open(shulkerSpot, menu -> menu instanceof ShulkerBoxMenu)) go(Step.TakeSeeds);
+                if (open(shulkerSpot, menu -> menu instanceof ShulkerBoxMenu)) go(Step.TakeItems);
                 else if (timedOut(OPEN_TIMEOUT)) {
                     failure = "Couldn't open the shulker.";
                     go(Step.BreakShulker);
                 }
                 yield Result.Busy;
             }
-            case TakeSeeds -> {
+            case TakeItems -> {
                 // Keep one slot free so the shulker has somewhere to go when we break it
-                if (!takeSeeds(1)) {
+                if (!takeItems(1)) {
+                    sourceLeft = othersLeft + countInContainer();
                     mc.player.closeContainer();
                     go(Step.BreakShulker);
                 }
@@ -199,7 +230,14 @@ class SeedRestocker {
     // Steps
 
     private Result finishStorage() {
+        sourceLeft = countInContainer();
+        boolean tookAny = InvUtils.find(wanted).count() > startCount;
         mc.player.closeContainer();
+
+        if (sourceLeft == 0 && !tookAny) {
+            failure = "The " + what + " storage is empty.";
+            return Result.Failed;
+        }
         return Result.Done;
     }
 
@@ -212,8 +250,15 @@ class SeedRestocker {
 
         shulkerSlot = bestShulkerIn(i -> menu.getSlot(i).getItem(), 27);
         if (shulkerSlot == -1) {
-            cleanUp("No shulker with your selected seeds in your ender chest.");
+            sourceLeft = 0;
+            cleanUp("No shulker with " + what + " in your ender chest.");
             return;
+        }
+
+        // Whatever the other shulkers hold, so we know if the ender chest runs dry once this one's emptied
+        othersLeft = 0;
+        for (int i = 0; i < 27; i++) {
+            if (i != shulkerSlot) othersLeft += countInShulker(menu.getSlot(i).getItem());
         }
 
         shulkerSpot = findSpot(echestSpot);
@@ -258,17 +303,17 @@ class SeedRestocker {
     }
 
     /**
-     * Shift-clicks one stack of seeds out of the open container.
+     * Shift-clicks one stack of the wanted items out of the open container.
      * @return false once there's nothing left to take or no room left to take it into
      */
-    private boolean takeSeeds(int keepFree) {
+    private boolean takeItems(int keepFree) {
         AbstractContainerMenu menu = mc.player.containerMenu;
         if (menu == mc.player.inventoryMenu) return false;
         if (emptySlots() <= keepFree) return false;
 
         int containerSlots = menu.slots.size() - 36;
         for (int i = 0; i < containerSlots; i++) {
-            if (module.isSeed(menu.getSlot(i).getItem())) {
+            if (wanted.test(menu.getSlot(i).getItem())) {
                 InvUtils.shiftClick().slotId(i);
                 wait = CLICK_DELAY;
                 return true;
@@ -278,10 +323,29 @@ class SeedRestocker {
         return false;
     }
 
+    /**
+     * How many of the wanted items the open container still holds.
+     */
+    private int countInContainer() {
+        AbstractContainerMenu menu = mc.player.containerMenu;
+        if (menu == mc.player.inventoryMenu) return -1;
+
+        int count = 0;
+        int containerSlots = menu.slots.size() - 36;
+        for (int i = 0; i < containerSlots; i++) {
+            ItemStack stack = menu.getSlot(i).getItem();
+            if (wanted.test(stack)) count += stack.getCount();
+        }
+        return count;
+    }
+
     // Helpers
 
     private void reset() {
         failure = null;
+        sourceLeft = -1;
+        othersLeft = 0;
+        startCount = InvUtils.find(wanted).count();
         storage = echestSpot = shulkerSpot = null;
         shulkerSlot = -1;
         shulkerItem = null;
@@ -412,29 +476,33 @@ class SeedRestocker {
     }
 
     /**
-     * The slot of the shulker holding the most of the selected seeds, or -1.
+     * The slot of the shulker holding the most of the wanted items, or -1.
      */
     private int bestShulkerIn(IntFunction<ItemStack> slots, int size) {
-        int best = -1, bestSeeds = 0;
-        ItemStack[] contents = new ItemStack[27];
+        int best = -1, bestCount = 0;
 
         for (int i = 0; i < size; i++) {
-            ItemStack stack = slots.apply(i);
-            if (!Utils.isShulker(stack.getItem())) continue;
-
-            Utils.getItemsInContainerItem(stack, contents);
-            int seeds = 0;
-            for (ItemStack content : contents) {
-                if (content != null && module.isSeed(content)) seeds += content.getCount();
-            }
-
-            if (seeds > bestSeeds) {
+            int count = countInShulker(slots.apply(i));
+            if (count > bestCount) {
                 best = i;
-                bestSeeds = seeds;
+                bestCount = count;
             }
         }
 
         return best;
+    }
+
+    private int countInShulker(ItemStack stack) {
+        if (!Utils.isShulker(stack.getItem())) return 0;
+
+        ItemStack[] contents = new ItemStack[27];
+        Utils.getItemsInContainerItem(stack, contents);
+
+        int count = 0;
+        for (ItemStack content : contents) {
+            if (content != null && wanted.test(content)) count += content.getCount();
+        }
+        return count;
     }
 
     private boolean isEChestMenu(AbstractContainerMenu menu) {
