@@ -64,7 +64,11 @@ public final class Categories {
         String id = normalize(id(stack));
         if (label.equals(name) || label.equals(id)) return 100;
 
-        Set<String> words = words(name + " " + id);
+        // Nicknames: "rockets", "crystals", "obby", "egaps"...
+        Set<String> nicknamed = SHORTHANDS.get(singularPhrase(label));
+        if (nicknamed != null && nicknamed.contains(id(stack))) return 60;
+
+        Set<String> words = words(name + " " + id + " " + extraWords(stack));
         if (allIn(label, words)) return 60;
 
         Predicate<ItemStack> category = CATEGORIES.get(singularPhrase(label));
@@ -133,6 +137,56 @@ public final class Categories {
         return set;
     }
 
+    /**
+     * Words an item is known by beyond its name: its enchantments (stored ones too, for books) and its potion.
+     */
+    private static String extraWords(ItemStack stack) {
+        StringBuilder out = new StringBuilder();
+        for (var type : List.of(DataComponents.ENCHANTMENTS, DataComponents.STORED_ENCHANTMENTS)) {
+            var enchants = stack.get(type);
+            if (enchants == null) continue;
+            for (var holder : enchants.keySet()) out.append(' ').append(path(holder.getRegisteredName()));
+        }
+
+        var potion = stack.get(DataComponents.POTION_CONTENTS);
+        if (potion != null) potion.potion().ifPresent(holder -> out.append(' ').append(path(holder.getRegisteredName())));
+
+        return normalize(out.toString());
+    }
+
+    private static String path(String id) {
+        int colon = id.indexOf(':');
+        return colon >= 0 ? id.substring(colon + 1) : id;
+    }
+
+    /**
+     * The item a shulker is mostly full of: whichever takes up the most slots, then the most items. Null for anything
+     * that isn't a shulker with items in it.
+     */
+    public static ItemStack dominantContent(ItemStack shulker) {
+        if (!Utils.isShulker(shulker.getItem())) return null;
+
+        ItemStack[] contents = new ItemStack[27];
+        Utils.getItemsInContainerItem(shulker, contents);
+
+        Map<net.minecraft.world.item.Item, int[]> tally = new HashMap<>();
+        Map<net.minecraft.world.item.Item, ItemStack> sample = new HashMap<>();
+        for (ItemStack stack : contents) {
+            if (stack == null || stack.isEmpty()) continue;
+            int[] t = tally.computeIfAbsent(stack.getItem(), i -> new int[2]);
+            t[0]++;
+            t[1] += stack.getCount();
+            sample.putIfAbsent(stack.getItem(), stack);
+        }
+
+        net.minecraft.world.item.Item best = null;
+        for (var entry : tally.entrySet()) {
+            int[] t = entry.getValue();
+            if (best == null || t[0] > tally.get(best)[0] || (t[0] == tally.get(best)[0] && t[1] > tally.get(best)[1])) best = entry.getKey();
+        }
+        return best == null ? null : sample.get(best);
+    }
+
     private static boolean allIn(String label, Set<String> words) {
         for (String word : label.split(" ")) {
             if (word.isEmpty()) continue;
@@ -145,6 +199,8 @@ public final class Categories {
 
     public static String singular(String word) {
         if (word.endsWith("ies") && word.length() > 4) return word.substring(0, word.length() - 3) + "y";
+        if (word.endsWith("oes") && word.length() > 4) return word.substring(0, word.length() - 2);
+        if (word.endsWith("ves") && word.length() > 4) return word.substring(0, word.length() - 3) + "f";
         if (word.endsWith("ches") || word.endsWith("shes") || word.endsWith("xes")) return word.substring(0, word.length() - 2);
         if (word.length() > 3 && word.endsWith("s") && !word.endsWith("ss") && !word.endsWith("us")) return word.substring(0, word.length() - 1);
         return word;
@@ -164,6 +220,71 @@ public final class Categories {
     }
 
     // Categories
+
+    private static final Map<String, Set<String>> SHORTHANDS = new HashMap<>();
+
+    /**
+     * Short names players use for an item, mapped to the items they mean. Stored singular, so plurals work too.
+     */
+    private static void nick(String items, String... names) {
+        Set<String> ids = Set.of(items.split(","));
+        for (String name : names) SHORTHANDS.put(singularPhrase(normalize(name)), ids);
+    }
+
+    static {
+        nick("firework_rocket", "rocket", "firework", "fireworks", "rockets", "elytra rockets", "flight", "boost", "boosts");
+        nick("firework_star", "firework star", "star");
+        nick("end_crystal", "crystal", "end crystal", "crystals", "cry", "crys");
+        nick("ender_pearl", "pearl", "ep", "epearl", "ender pearl");
+        nick("ender_eye", "eye", "eye of ender", "eyes of ender", "ender eye");
+        nick("obsidian,crying_obsidian", "obby", "obbie", "obsi", "obs");
+        nick("golden_apple", "gap", "gapple", "golden apple", "gold apple", "gaps");
+        nick("enchanted_golden_apple", "egap", "egapple", "god apple", "notch apple", "notch", "enchanted apple", "egaps");
+        nick("totem_of_undying", "totem", "tot", "tots", "totems", "undying");
+        nick("experience_bottle", "xp", "exp", "xp bottle", "exp bottle", "bottle", "experience", "bottle o enchanting", "xp bottles");
+        nick("respawn_anchor", "anchor", "anchors");
+        nick("glowstone", "glowstone", "anchor fuel");
+        nick("cooked_beef", "steak", "steaks");
+        nick("porkchop,cooked_porkchop", "pork", "porkchop", "chops");
+        nick("cooked_beef,cooked_porkchop,cooked_chicken,cooked_mutton,cooked_rabbit,cooked_cod,cooked_salmon", "cooked", "cooked food", "cooked meat");
+        nick("golden_carrot", "gold carrot", "golden carrot", "gcarrot", "gcarrots");
+        nick("shulker_shell", "shell", "shulker shell");
+        nick("cobblestone,cobbled_deepslate", "cobble", "cobbles");
+        nick("netherite_scrap", "scrap", "netherite scrap");
+        nick("ancient_debris", "debris", "ancient debris");
+        nick("netherite_ingot", "netherite ingot", "neth", "neth ingot");
+        nick("slime_ball,slime_block", "slime", "slimeball", "slimes");
+        nick("honey_bottle,honey_block,honeycomb", "honey");
+        nick("ender_chest", "echest", "e chest", "enderchest", "ender chest");
+        nick("diamond", "dia", "dias", "diamonds", "diamond gem");
+        nick("emerald", "em", "ems", "emmy", "emmies", "emerald");
+        nick("lapis_lazuli", "lapis", "lapis lazuli");
+        nick("redstone", "redstone dust", "dust");
+        nick("gunpowder", "gp", "powder", "sulphur", "sulfur");
+        nick("blaze_rod", "blaze rod", "blazerod");
+        nick("tnt", "tnt", "dynamite");
+        nick("cobweb", "web", "webs", "cobweb");
+        nick("bone_meal", "bonemeal", "bm");
+        nick("wind_charge", "wind charge", "charge");
+        nick("trident", "trident", "trident");
+        nick("elytra", "elytra", "elytras", "wing", "wings");
+        nick("shield", "shield", "shields");
+        nick("name_tag", "nametag", "name tag", "tag");
+        nick("saddle", "saddle");
+        nick("heart_of_the_sea", "heart", "hots");
+        nick("nether_star", "star", "nether star");
+        nick("dragon_egg", "egg", "dragon egg");
+        nick("beacon", "beacon");
+        nick("enchanted_book", "ebook", "e book", "enchanted book", "book");
+        nick("splash_potion", "splash", "splash potion");
+        nick("lingering_potion", "lingering", "lingering potion");
+        nick("chorus_fruit", "chorus", "chorus fruit");
+        nick("sea_lantern", "sea lantern", "sealantern");
+        nick("hay_block", "hay", "hay bale");
+        nick("iron_ingot", "iron", "iron ingot");
+        nick("gold_ingot", "gold", "gold ingot");
+        nick("copper_ingot", "copper", "copper ingot");
+    }
 
     private static final Set<String> CATCH_ALL = Set.of("misc", "miscellaneous", "other", "others", "*", "overflow",
         "everything", "anything", "random", "rest", "leftover", "leftovers", "unsorted", "mixed", "general");

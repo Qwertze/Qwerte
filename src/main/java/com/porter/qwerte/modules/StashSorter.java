@@ -860,6 +860,21 @@ public class StashSorter extends Module {
 
         if (mode.get() == Mode.Tiers) return tierBoxes.getOrDefault(tier(stack), List.of());
 
+        // A shulker goes where what it's mostly full of goes: a shulker of totems belongs with the totems. Only when
+        // no sign describes its contents does it fall back to signs about shulkers themselves, like "shulkers" or "kits".
+        ItemStack inside = Categories.dominantContent(stack);
+        if (inside != null) {
+            List<Box> byContents = bestSigned(inside);
+            if (!byContents.isEmpty()) return byContents;
+        }
+
+        return bestSigned(stack);
+    }
+
+    /**
+     * The containers whose signs describe this item best, all tied, or empty if no sign describes it.
+     */
+    private List<Box> bestSigned(ItemStack stack) {
         int best = 0;
         List<Box> result = new ArrayList<>();
         for (Box box : stash.boxes) {

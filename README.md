@@ -106,13 +106,20 @@ switched on and off on its own.
   shulkers, items that stack to 64, items that stack to 16, then singles and everything else.
 - **Signs mode** reads the signs on the side of each container or standing on top of it. Each item goes to the
   container whose signs describe it best. Items no sign describes stay where they are.
+- **Shulkers are sorted by what's inside.** A shulker goes where the item filling most of its slots goes, so a shulker
+  that's mostly totems ends up in the `Totems` chest. Only when no sign describes its contents does it go to a
+  `shulkers` or `kits` sign.
 
 #### What signs understand
 Write signs the way you'd talk. Each line is read on its own, a sign's lines are also read together, and lists like
 `Logs, Planks & Wood` are split up. Filler like "stuff", "items" or "supplies" is ignored, so `Redstone Stuff` works.
 
 - **Exact names** win over everything: `Diamond Block`, `Totem of Undying`.
-- **Words** in an item's name: `diamonds`, `ores`, `gold` (also finds golden items), `oak`, `copper`.
+- **Words** in an item's name, so a shorter name finds the longer one: `rockets` finds firework rockets, `crystals`
+  finds end crystals, `diamonds`, `ores`, `gold` (golden items too), `oak`, `copper`.
+- **Nicknames** players use: `obby`, `gaps`, `egaps`, `tots`, `pearls`, `xp`, `echests`, `cobble`, `steak`, `gp`,
+  `scrap`, `debris`, `dias`, `ems` and more.
+- **Enchantments and potions**: `Mending Books`, `Protection`, `Strength Potions`, `Fire Resistance`.
 - **Hundreds of categories and slang**, for example:
 
 | Kind | Sign words |
