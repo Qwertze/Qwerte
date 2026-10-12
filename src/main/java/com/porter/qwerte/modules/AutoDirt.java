@@ -64,7 +64,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
     private final Setting<Integer> delay = sgGeneral.add(new IntSetting.Builder()
         .name("delay")
         .description("Ticks to wait between placing batches.")
-        .defaultValue(2)
+        .defaultValue(1)
         .range(0, 20)
         .sliderRange(0, 20)
         .build()
@@ -73,7 +73,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
     private final Setting<Integer> blocksPerTick = sgGeneral.add(new IntSetting.Builder()
         .name("blocks-per-tick")
         .description("How many dirt blocks to place per batch.")
-        .defaultValue(1)
+        .defaultValue(6)
         .range(1, 8)
         .sliderRange(1, 8)
         .build()
@@ -97,7 +97,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
     private final Setting<Integer> depth = sgGeneral.add(new IntSetting.Builder()
         .name("depth")
         .description("How many blocks below your feet to look for ground to cover.")
-        .defaultValue(2)
+        .defaultValue(1)
         .range(1, 6)
         .sliderRange(1, 6)
         .visible(belowFeet::get)
@@ -107,7 +107,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
     private final Setting<Boolean> skipSelf = sgGeneral.add(new BoolSetting.Builder()
         .name("skip-own-column")
         .description("Doesn't cover the block you're standing on.")
-        .defaultValue(false)
+        .defaultValue(true)
         .build()
     );
 
@@ -121,7 +121,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
         .name("rotate")
         .description("Faces the block you're placing against.")
-        .defaultValue(true)
+        .defaultValue(false)
         .build()
     );
 

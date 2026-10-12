@@ -105,20 +105,24 @@ Both modules are in Meteor's **Farming** category. Every feature can be switched
 
 Open Meteor's click GUI (Right Shift by default), go to **Farming** and open **auto-till**.
 
+Out of the box, auto-till waters, plants and walks with Baritone. Each step below says which setting controls that part.
+
 ### Just tilling
-Turn the module on with a hoe in your hotbar and walk around. The brown boxes are the blocks it's about to till.
+Turn off **auto-walk**, **auto-water** and **auto-plant**, then turn the module on with a hoe in your hotbar and walk
+around. The purple boxes are the blocks it's about to till.
 
 ### Farming with water
-1. Turn on **auto-water** in the **Water** group.
+1. Leave **auto-water** on in the **Water** group.
 2. Carry a water bucket, plus a shovel if you want the holes dug faster.
-3. Stand in a dry, flat patch. A blue box marks where it digs the hole. Once it's filled, the land around it gets tilled.
+3. Stand in a dry, flat patch. A magenta box marks where it digs the hole. Once it's filled, the land around it gets
+   tilled.
 
 ### Planting
-1. Turn on **auto-plant** in the **Planting** group and pick your crops in **seeds**.
+1. Leave **auto-plant** on in the **Planting** group and pick your crops in **seeds**.
 2. Leave **bone-meal** on to grow them instantly while you have bone meal.
 
 ### Seed restocking
-1. Turn on **seed-restock** and set **restock-at** (0 means restock when you run out).
+1. Turn on **seed-restock** and set **restock-at** (default 1; 0 means restock only once you've run out).
 2. Pick a **restock-mode**:
    - **Storage:** turn on **pick-storage** and right-click your seed chest, or type its coordinates into
      **seed-storage**. If it's out of reach you'll need auto-walk on.
@@ -128,8 +132,8 @@ Turn the module on with a hoe in your hotbar and walk around. The brown boxes ar
 
 ### Full automation with Baritone
 1. Install dekrom's Baritone (see [Installation](#installation)).
-2. Turn on **auto-walk** in the **Automation** group and set **search-radius** to the size of the area to farm. It's
-   measured from where you turn the module on.
+2. Leave **auto-walk** on in the **Automation** group and set **search-radius** (default 64) to the size of the area
+   to farm. It's measured from where you turn the module on.
 3. Turn on **refill-water** and choose a **refill-source**:
    - **Nearest Pool:** finds the closest 4x4 water source within **water-search-radius**.
    - **Station:** turn on **pick-station** and right-click a water block, or type its coordinates into **station**.
@@ -147,36 +151,39 @@ Turn the module on with a hoe in your hotbar and walk around. The brown boxes ar
 
 ## Settings reference
 
+The defaults are a tuned setup that works well on 2b2t, so most people only need to set their seed storage or refill
+station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `auto-plant`.
+
 ### auto-till
 
 | Group | Setting | Default | Description |
 |---|---|---|---|
 | General | `reach` | 4.5 | Max distance from your eyes to a block's center. |
 | General | `delay` | 2 | Ticks to wait between batches. |
-| General | `blocks-per-tick` | 1 | How many blocks to work on per batch. |
-| General | `blocks` | Grass Block, Dirt, Dirt Path | Blocks to turn into farmland. |
+| General | `blocks-per-tick` | 7 | How many blocks to work on per batch. |
+| General | `blocks` | Grass Block, Dirt, Dirt Path, Coarse Dirt | Blocks to turn into farmland. Coarse dirt is hoed into dirt first. |
 | General | `only-hydrated` | off | Only till blocks that would be hydrated. |
 | General | `auto-switch` | on | Switch to the right item from your hotbar. |
 | General | `swap-back` | on | Switch back to your previous slot afterwards. |
-| General | `rotate` | on | Face blocks while working on them. |
-| Planting | `auto-plant` | off | Plant seeds on empty farmland. |
+| General | `rotate` | off | Face blocks while working on them. |
+| Planting | `auto-plant` | on | Plant seeds on empty farmland. |
 | Planting | `seeds` | Wheat Seeds | Which seeds to plant. |
 | Planting | `bone-meal` | on | Bone meal crops until fully grown. |
 | Planting | `seed-restock` | off | Restock seeds when low. |
 | Planting | `restock-mode` | Storage | Storage or Ender Chest. |
-| Planting | `restock-at` | 0 | Restock at this many seeds or fewer. |
+| Planting | `restock-at` | 1 | Restock at this many seeds or fewer. |
 | Planting | `seed-storage` | 0, 0, 0 | The container to restock from. |
 | Planting | `pick-storage` | off | Right-click a container to set it as the storage. |
-| Water | `auto-water` | off | Dig and fill water holes for dry land. |
-| Water | `water-side-color` / `water-line-color` | blue | Colors of the planned water hole. |
-| Automation | `auto-walk` | off | Walk to more land with Baritone. |
+| Water | `auto-water` | on | Dig and fill water holes for dry land. |
+| Water | `water-side-color` / `water-line-color` | magenta | Colors of the planned water hole. |
+| Automation | `auto-walk` | on | Walk to more land with Baritone. Turns itself off if Baritone isn't installed. |
 | Automation | `refill-water` | on | Walk to water and refill empty buckets. |
 | Automation | `refill-source` | Nearest Pool | Nearest Pool or Station. |
 | Automation | `station` | 0, 0, 0 | The water block to refill at. |
 | Automation | `pick-station` | off | Right-click a water block to set it as the station. |
 | Automation | `water-search-radius` | 96 | How far to look for a 4x4 pool. |
-| Automation | `search-radius` | 32 | How far from your start point to look for land. |
-| Automation | `search-height` | 4 | How far up and down to look for land. |
+| Automation | `search-radius` | 64 | How far from your start point to look for land. |
+| Automation | `search-height` | 1 | How far up and down to look for land. |
 | Automation | `combine-trips` | on | Restock seeds on water trips and refill water on seed trips. |
 | Automation | `seed-top-up-at` | 128 | On a water trip, restock seeds if you have fewer than this. |
 | Safety | `anti-break` | on | Don't use hoes that are about to break. |
@@ -184,21 +191,21 @@ Turn the module on with a hoe in your hotbar and walk around. The brown boxes ar
 | Safety | `disable-when-out` | on | Turn off when you have no usable hoe left. |
 | Render | `render` | on | Highlight blocks about to be tilled. |
 | Render | `shape-mode` | Both | How the highlight is drawn. |
-| Render | `side-color` / `line-color` | brown | Colors of the highlight. |
+| Render | `side-color` / `line-color` | purple / pink | Colors of the highlight. |
 
 ### auto-dirt
 
 | Group | Setting | Default | Description |
 |---|---|---|---|
 | General | `reach` | 4.5 | Max distance from your eyes to the spot to fill. |
-| General | `delay` | 2 | Ticks to wait between batches. |
-| General | `blocks-per-tick` | 1 | How many blocks to place per batch. |
+| General | `delay` | 1 | Ticks to wait between batches. |
+| General | `blocks-per-tick` | 6 | How many blocks to place per batch. |
 | General | `dirt-item` | Dirt | Dirt, Coarse Dirt, Rooted Dirt or Grass Block. |
 | General | `below-feet-only` | on | Only cover ground below your feet. |
-| General | `depth` | 2 | How far below your feet to look for ground. |
-| General | `skip-own-column` | off | Leave the block you're standing on uncovered. |
+| General | `depth` | 1 | How far below your feet to look for ground. |
+| General | `skip-own-column` | on | Leave the block you're standing on uncovered. |
 | General | `ignore` | chests, barrel, crafting table, furnace | Blocks never covered. |
-| General | `rotate` | on | Face the block being placed against. |
+| General | `rotate` | off | Face the block being placed against. |
 | General | `swap-back` | on | Switch back to your previous slot afterwards. |
 | General | `disable-when-out` | on | Turn off when out of dirt and unable to restock. |
 | Restock | `restock` | off | Restock dirt when low. |

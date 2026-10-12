@@ -79,7 +79,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<Integer> blocksPerTick = sgGeneral.add(new IntSetting.Builder()
         .name("blocks-per-tick")
         .description("How many blocks to till per batch.")
-        .defaultValue(1)
+        .defaultValue(7)
         .range(1, 8)
         .sliderRange(1, 8)
         .build()
@@ -88,7 +88,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<List<Block>> blocks = sgGeneral.add(new BlockListSetting.Builder()
         .name("blocks")
         .description("Blocks to turn into farmland.")
-        .defaultValue(Blocks.GRASS_BLOCK, Blocks.DIRT, Blocks.DIRT_PATH)
+        .defaultValue(Blocks.GRASS_BLOCK, Blocks.DIRT, Blocks.DIRT_PATH, Blocks.COARSE_DIRT)
         .build()
     );
 
@@ -117,7 +117,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
         .name("rotate")
         .description("Faces the block being tilled or dug. Placing water always rotates, since buckets use your look direction.")
-        .defaultValue(true)
+        .defaultValue(false)
         .build()
     );
 
@@ -131,7 +131,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<Boolean> autoPlant = sgPlanting.add(new BoolSetting.Builder()
         .name("auto-plant")
         .description("Plants seeds on empty farmland once the land around is tilled.")
-        .defaultValue(false)
+        .defaultValue(true)
         .build()
     );
 
@@ -172,7 +172,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<Integer> restockAt = sgPlanting.add(new IntSetting.Builder()
         .name("restock-at")
         .description("Restock when you're down to this many seeds or fewer, and there's farmland waiting to be planted.")
-        .defaultValue(0)
+        .defaultValue(1)
         .range(0, 256)
         .sliderRange(0, 64)
         .visible(() -> autoPlant.get() && seedRestock.get())
@@ -201,14 +201,14 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<Boolean> autoWater = sgWater.add(new BoolSetting.Builder()
         .name("auto-water")
         .description("Digs a hole and fills it with a water bucket when tillable blocks have no water nearby. Dry blocks wait to be tilled until they're watered.")
-        .defaultValue(false)
+        .defaultValue(true)
         .build()
     );
 
     private final Setting<SettingColor> waterSideColor = sgWater.add(new ColorSetting.Builder()
         .name("water-side-color")
         .description("The side color of the planned water hole.")
-        .defaultValue(new SettingColor(40, 100, 230, 50))
+        .defaultValue(new SettingColor(255, 3, 247, 50))
         .visible(autoWater::get)
         .build()
     );
@@ -216,7 +216,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<SettingColor> waterLineColor = sgWater.add(new ColorSetting.Builder()
         .name("water-line-color")
         .description("The line color of the planned water hole.")
-        .defaultValue(new SettingColor(40, 100, 230, 255))
+        .defaultValue(new SettingColor(217, 40, 230, 255))
         .visible(autoWater::get)
         .build()
     );
@@ -226,7 +226,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<Boolean> autoWalk = sgAutomation.add(new BoolSetting.Builder()
         .name("auto-walk")
         .description("Uses Baritone to walk to more untilled land when nothing is left in reach.")
-        .defaultValue(false)
+        .defaultValue(true)
         .build()
     );
 
@@ -277,7 +277,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<Integer> searchRadius = sgAutomation.add(new IntSetting.Builder()
         .name("search-radius")
         .description("How far from where you enabled the module to look for land to till.")
-        .defaultValue(32)
+        .defaultValue(64)
         .range(8, 128)
         .sliderRange(8, 64)
         .visible(autoWalk::get)
@@ -287,7 +287,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<Integer> searchHeight = sgAutomation.add(new IntSetting.Builder()
         .name("search-height")
         .description("How many blocks above and below you to search.")
-        .defaultValue(4)
+        .defaultValue(1)
         .range(1, 16)
         .sliderRange(1, 8)
         .visible(autoWalk::get)
@@ -358,7 +358,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<SettingColor> sideColor = sgRender.add(new ColorSetting.Builder()
         .name("side-color")
         .description("The side color of the highlight.")
-        .defaultValue(new SettingColor(139, 90, 43, 50))
+        .defaultValue(new SettingColor(87, 77, 255, 50))
         .visible(render::get)
         .build()
     );
@@ -366,7 +366,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final Setting<SettingColor> lineColor = sgRender.add(new ColorSetting.Builder()
         .name("line-color")
         .description("The line color of the highlight.")
-        .defaultValue(new SettingColor(139, 90, 43, 255))
+        .defaultValue(new SettingColor(255, 119, 239, 255))
         .visible(render::get)
         .build()
     );
