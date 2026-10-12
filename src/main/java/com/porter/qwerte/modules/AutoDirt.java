@@ -1,16 +1,15 @@
 package com.porter.qwerte.modules;
 
 import com.porter.qwerte.QwerteAddon;
+import com.porter.qwerte.compat.Players;
+import com.porter.qwerte.compat.RightClick;
 import com.porter.qwerte.modules.AutoTill.RestockMode;
 import com.porter.qwerte.utils.BaritoneHelper;
-import meteordevelopment.meteorclient.MeteorClient;
-import meteordevelopment.meteorclient.events.meteor.MouseClickEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -30,7 +29,6 @@ import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
-import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -255,35 +253,33 @@ public class AutoDirt extends Module implements Restocker.Owner {
         super(QwerteAddon.CATEGORY, "auto-dirt", "Covers the ground around you with dirt, never stacking dirt on dirt.");
 
         // Always listening so the storage can be picked while the module is off
-        MeteorClient.EVENT_BUS.subscribe(new StoragePicker());
+        RightClick.listen(this::onRightClick);
     }
 
-    private class StoragePicker {
-        @EventHandler
-        private void onMouseClick(MouseClickEvent event) {
-            if (!pickStorage.get()) return;
+    /**
+     * Picks the dirt storage while pick-storage is on.
+     * @return true when picking, so the click doesn't open the container
+     */
+    private boolean onRightClick() {
+        if (!pickStorage.get()) return false;
 
-            // The mouse is only grabbed in game, never while a screen is open
-            if (mc.player == null || mc.level == null || !mc.mouseHandler.isMouseGrabbed()) return;
-            if (event.action != KeyAction.Press || event.button() != GLFW.GLFW_MOUSE_BUTTON_RIGHT) return;
+        // The mouse is only grabbed in game, never while a screen is open
+        if (mc.player == null || mc.level == null || !mc.mouseHandler.isMouseGrabbed()) return false;
 
-            // Don't let the click open the container while picking
-            event.cancel();
+        Vec3 eyes = mc.player.getEyePosition();
+        Vec3 end = eyes.add(mc.player.getViewVector(1f).scale(64));
+        BlockHitResult hit = mc.level.clip(new ClipContext(eyes, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
 
-            Vec3 eyes = mc.player.getEyePosition();
-            Vec3 end = eyes.add(mc.player.getViewVector(1f).scale(64));
-            BlockHitResult hit = mc.level.clip(new ClipContext(eyes, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
-
-            if (hit.getType() != HitResult.Type.BLOCK || !(mc.level.getBlockEntity(hit.getBlockPos()) instanceof Container)) {
-                warning("That isn't a container, try again.");
-                return;
-            }
-
-            dirtStorage.set(hit.getBlockPos().immutable());
-            pickStorage.set(false);
-            restockUnavailable = false;
-            info("Dirt storage set to %s.", dirtStorage.get().toShortString());
+        if (hit.getType() != HitResult.Type.BLOCK || !(mc.level.getBlockEntity(hit.getBlockPos()) instanceof Container)) {
+            warning("That isn't a container, try again.");
+            return true;
         }
+
+        dirtStorage.set(hit.getBlockPos().immutable());
+        pickStorage.set(false);
+        restockUnavailable = false;
+        info("Dirt storage set to %s.", dirtStorage.get().toShortString());
+        return true;
     }
 
     @Override
@@ -480,13 +476,13 @@ public class AutoDirt extends Module implements Restocker.Owner {
         }
 
         returnPos = mc.player.blockPosition();
-        slotBefore = mc.player.getInventory().getSelectedSlot();
+        slotBefore = Players.selectedSlot();
         walkTo(storage, 2, State.GoingToStorage);
     }
 
     private void startRestockingHere() {
         // Restocking swaps items around, so put back what we were holding afterwards
-        if (slotBefore < 0) slotBefore = mc.player.getInventory().getSelectedSlot();
+        if (slotBefore < 0) slotBefore = Players.selectedSlot();
         state = State.Restocking;
         stateTicks = 0;
     }
@@ -573,7 +569,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
      */
     private void finishRestock() {
         if (state != State.Working && slotBefore >= 0 && mc.player != null
-            && mc.player.getInventory().getSelectedSlot() != slotBefore) {
+            && Players.selectedSlot() != slotBefore) {
             InvUtils.swap(slotBefore, false);
         }
 
@@ -652,7 +648,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
         for (int i = 0; i < 9; i++) {
             if (mc.player.getInventory().getItem(i).isEmpty()) return i;
         }
-        return mc.player.getInventory().getSelectedSlot();
+        return Players.selectedSlot();
     }
 
     @EventHandler

@@ -1,15 +1,14 @@
 package com.porter.qwerte.modules;
 
 import com.porter.qwerte.QwerteAddon;
+import com.porter.qwerte.compat.Players;
+import com.porter.qwerte.compat.RightClick;
 import com.porter.qwerte.utils.BaritoneHelper;
-import meteordevelopment.meteorclient.MeteorClient;
-import meteordevelopment.meteorclient.events.meteor.MouseClickEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
-import meteordevelopment.meteorclient.utils.misc.input.KeyAction;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
@@ -36,7 +35,6 @@ import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.HitResult;
 import net.minecraft.world.phys.Vec3;
-import org.lwjgl.glfw.GLFW;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -202,6 +200,14 @@ public class AutoTill extends Module implements Restocker.Owner {
         .name("auto-water")
         .description("Digs a hole and fills it with a water bucket when tillable blocks have no water nearby. Dry blocks wait to be tilled until they're watered.")
         .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> fillHoles = sgWater.add(new BoolSetting.Builder()
+        .name("fill-holes")
+        .description("Fills any empty 1x1 hole in reach that would water dry farmland or dirt, even while Baritone is walking, so holes missed earlier get filled on the way past.")
+        .defaultValue(true)
+        .visible(autoWater::get)
         .build()
     );
 
@@ -394,6 +400,12 @@ public class AutoTill extends Module implements Restocker.Owner {
     private int noAimTicks;
     private int digTicks;
     private int waterMisses;
+
+    // Filling holes we pass by
+    private BlockPos passingHole;
+    private int holeScanTicks;
+    private int holeCooldown;
+    private final Map<BlockPos, Integer> holeAttempts = new HashMap<>();
     private BlockPos approachedSpot;
     private final Set<BlockPos> badWaterSpots = new HashSet<>();
     private final Map<BlockPos, Integer> tillAttempts = new HashMap<>();
@@ -456,6 +468,9 @@ public class AutoTill extends Module implements Restocker.Owner {
     private static final int HOE_MISSING_TICKS = 20 * 2;
     // Dirt takes under a second even by hand, so this only trips when something is badly wrong
     private static final int DIG_TIMEOUT_TICKS = 20 * 10;
+    // Baritone can still be sliding to a stop when it says it's done
+    private static final int SETTLE_TICKS = 10;
+    private static final int MAX_STAND_TRIES = 3;
 
     private State state = State.Working;
     private boolean usedBaritone;
@@ -486,27 +501,33 @@ public class AutoTill extends Module implements Restocker.Owner {
     private int regenWait;
     private final Set<BlockPos> badPools = new HashSet<>();
 
+    // Arriving at the water: bank spots that didn't work out, and a moment to stop moving before judging
+    private final Set<BlockPos> badStands = new HashSet<>();
+    private int standTries;
+    private int settleTicks;
+    private boolean arrived;
+
     public AutoTill() {
         super(QwerteAddon.CATEGORY, "auto-till", "Uses a hoe to turn nearby dirt and grass into farmland.");
 
         // Always listening so the station and storage can be picked while the module is off
-        MeteorClient.EVENT_BUS.subscribe(new BlockPicker());
+        BlockPicker picker = new BlockPicker();
+        RightClick.listen(picker::onRightClick);
     }
 
     private class BlockPicker {
-        @EventHandler
-        private void onMouseClick(MouseClickEvent event) {
-            if (!pickStation.get() && !pickStorage.get()) return;
+        /**
+         * @return true when picking, so the click doesn't place, use or open anything
+         */
+        private boolean onRightClick() {
+            if (!pickStation.get() && !pickStorage.get()) return false;
 
             // The mouse is only grabbed in game, never while a screen is open
-            if (mc.player == null || mc.level == null || !mc.mouseHandler.isMouseGrabbed()) return;
-            if (event.action != KeyAction.Press || event.button() != GLFW.GLFW_MOUSE_BUTTON_RIGHT) return;
-
-            // Don't let the click place, use or open anything while picking
-            event.cancel();
+            if (mc.player == null || mc.level == null || !mc.mouseHandler.isMouseGrabbed()) return false;
 
             if (pickStation.get()) pickStation();
             else pickStorage();
+            return true;
         }
 
         private void pickStation() {
@@ -572,6 +593,10 @@ public class AutoTill extends Module implements Restocker.Owner {
         unreachable.clear();
         badPools.clear();
         badWaterSpots.clear();
+        holeAttempts.clear();
+        passingHole = null;
+        holeScanTicks = 0;
+        holeCooldown = 0;
         tillAttempts.clear();
         failedTills.clear();
         plantAttempts.clear();
@@ -611,6 +636,10 @@ public class AutoTill extends Module implements Restocker.Owner {
         // A failed refill only pauses refilling, try again after a while
         if (refillUnavailable && refillRetryTicks > 0 && --refillRetryTicks == 0) refillUnavailable = false;
         if (restockUnavailable && restockRetryTicks > 0 && --restockRetryTicks == 0) restockUnavailable = false;
+
+        // Fill any open hole we're passing, walking or not. Only skipped while filling buckets or restocking, those
+        // need the hands and the view to themselves.
+        if (state != State.Filling && state != State.Restocking && fillPassingHole()) return;
 
         // Travelling or refilling takes over the whole tick
         if (state != State.Working) {
@@ -949,29 +978,127 @@ public class AutoTill extends Module implements Restocker.Owner {
     }
 
     private void placeWater(BlockPos spot) {
-        if (!mc.level.getBlockState(spot).isAir()) return;
+        if (pourInto(spot)) waterMisses = 0;
+        else {
+            waterCooldown = 1;
+            waterMisses++;
+        }
+    }
+
+    /**
+     * Empties a water bucket into {@code spot}.
+     * @return false if the bucket wouldn't have landed in the spot from where we're looking, so nothing was used
+     */
+    private boolean pourInto(BlockPos spot) {
+        if (!mc.level.getBlockState(spot).isAir()) return true;
 
         // The aim was worked out at the start of the tick, but we've moved since. Trace exactly what the bucket will
         // see from here and skip this tick rather than spill water on the wrong block.
         BlockHitResult hit = traceLook(ClipContext.Fluid.NONE);
-        if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().relative(hit.getDirection()).equals(spot)) {
-            waterCooldown = 1;
-            waterMisses++;
-            return;
-        }
-        waterMisses = 0;
+        if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().relative(hit.getDirection()).equals(spot)) return false;
 
         FindItemResult bucket = findItem(stack -> stack.is(Items.WATER_BUCKET));
-        if (!bucket.found()) return;
+        if (!bucket.found()) return true;
 
         InteractionHand hand = bucket.isOffhand() ? InteractionHand.OFF_HAND : InteractionHand.MAIN_HAND;
         boolean doSwapBack = autoSwitch.get() && swapBack.get();
 
-        if (hand == InteractionHand.MAIN_HAND && !InvUtils.swap(bucket.slot(), doSwapBack)) return;
+        if (hand == InteractionHand.MAIN_HAND && !InvUtils.swap(bucket.slot(), doSwapBack)) return true;
 
         mc.gameMode.useItem(mc.player, hand);
 
         if (doSwapBack) InvUtils.swapBack();
+        return true;
+    }
+
+    // Filling holes in passing
+
+    /**
+     * Pours water into an open hole in reach that would hydrate dry land, wherever we are. Holes are looked for a few
+     * times a second, and a hole we've picked is aimed at every tick until it's filled or we've passed it.
+     * @return true if it used the tick
+     */
+    private boolean fillPassingHole() {
+        if (!autoWater.get() || !fillHoles.get()) return false;
+        if (holeCooldown > 0) {
+            holeCooldown--;
+            return false;
+        }
+
+        moveToHotbar(Items.WATER_BUCKET);
+        if (!findItem(stack -> stack.is(Items.WATER_BUCKET)).found()) {
+            passingHole = null;
+            return false;
+        }
+
+        Vec3 eyes = mc.player.getEyePosition();
+
+        if (passingHole != null && !isOpenHole(passingHole, eyes)) passingHole = null;
+        if (passingHole == null) {
+            if (holeScanTicks-- > 0) return false;
+            holeScanTicks = 5;
+
+            passingHole = findOpenHole(eyes);
+            if (passingHole == null) return false;
+        }
+
+        // Out of sight from here; while walking, we'll likely see into it in a moment
+        Vec3 aim = findWaterAim(eyes, passingHole);
+        if (aim == null) return false;
+
+        if (holeAttempts.merge(passingHole, 1, Integer::sum) > 5) {
+            badWaterSpots.add(passingHole);
+            passingHole = null;
+            return false;
+        }
+
+        BlockPos hole = passingHole;
+        Rotations.rotate(Rotations.getYaw(aim), Rotations.getPitch(aim), () -> {
+            if (pourInto(hole)) passingHole = null;
+        });
+        holeCooldown = 2;
+        return true;
+    }
+
+    private BlockPos findOpenHole(Vec3 eyes) {
+        double reachSq = reach.get() * reach.get();
+        int r = (int) Math.ceil(reach.get());
+        BlockPos center = mc.player.blockPosition();
+
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+
+        for (BlockPos pos : BlockPos.betweenClosed(center.offset(-r, -r - 1, -r), center.offset(r, r, r))) {
+            double dist = eyes.distanceToSqr(Vec3.atCenterOf(pos));
+            if (dist > reachSq || dist >= bestDist) continue;
+            if (!isOpenHole(pos, eyes) || !hydratesDryLand(pos)) continue;
+
+            best = pos.immutable();
+            bestDist = dist;
+        }
+
+        return best;
+    }
+
+    /**
+     * An empty 1x1x1 hole that will hold water: air with air above, solid on every side and underneath.
+     */
+    private boolean isOpenHole(BlockPos pos, Vec3 eyes) {
+        if (!mc.level.getBlockState(pos).isAir()) return false;
+        if (pos.equals(waterSpot) || badWaterSpots.contains(pos)) return false;
+        return isValidWaterSpot(pos, eyes);
+    }
+
+    /**
+     * Water here would hydrate at least one farmland or tillable block that has no water yet.
+     */
+    private boolean hydratesDryLand(BlockPos hole) {
+        for (BlockPos pos : BlockPos.betweenClosed(hole.offset(-4, 0, -4), hole.offset(4, 0, 4))) {
+            BlockState state = mc.level.getBlockState(pos);
+            if (!state.is(Blocks.FARMLAND) && !blocks.get().contains(state.getBlock())) continue;
+            if (!isNearWater(pos)) return true;
+        }
+        return false;
     }
 
     private BlockPos findWaterSpot(Vec3 eyes) {
@@ -1102,7 +1229,8 @@ public class AutoTill extends Module implements Restocker.Owner {
                 endTrip();
             }
             case GoingToWater -> {
-                if (stillTravelling()) return;
+                if (!arrived && stillTravelling()) return;
+                arrived = true;
                 arriveAtWater();
             }
             case Filling -> tickFilling();
@@ -1170,7 +1298,7 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     private void startRestockingHere() {
         // Restocking swaps items around, so put back what we were holding afterwards like after a walk
-        if (slotBeforeTrip < 0) slotBeforeTrip = mc.player.getInventory().getSelectedSlot();
+        if (slotBeforeTrip < 0) slotBeforeTrip = Players.selectedSlot();
         state = State.Restocking;
         stateTicks = 0;
     }
@@ -1290,10 +1418,12 @@ public class AutoTill extends Module implements Restocker.Owner {
         usedBaritone = true;
 
         // Baritone picks its own tools and blocks while it walks, remember what we were holding
-        if (state == State.Working) slotBeforeTrip = mc.player.getInventory().getSelectedSlot();
+        if (state == State.Working) slotBeforeTrip = Players.selectedSlot();
 
         pathTarget = pos;
         pathRange = range;
+        arrived = false;
+        settleTicks = 0;
         BaritoneHelper.moveNear(pos, range);
 
         state = next;
@@ -1311,7 +1441,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         seedsThisTrip = waterThisTrip = false;
 
         if (state != State.Working && slotBeforeTrip >= 0 && mc.player != null
-            && mc.player.getInventory().getSelectedSlot() != slotBeforeTrip) {
+            && Players.selectedSlot() != slotBeforeTrip) {
             InvUtils.swap(slotBeforeTrip, false);
         }
 
@@ -1373,6 +1503,8 @@ public class AutoTill extends Module implements Restocker.Owner {
      */
     private boolean startRefill() {
         waterThisTrip = true;
+        badStands.clear();
+        standTries = 0;
 
         if (usingStation()) {
             if (station.get().equals(BlockPos.ZERO)) {
@@ -1424,7 +1556,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         pool = usingStation() ? stationPool() : squareAt(poolCorner);
 
         if (pool == null || pool.isEmpty()) {
-            failPool();
+            failPool("there's no water source there anymore");
             return;
         }
 
@@ -1438,19 +1570,34 @@ public class AutoTill extends Module implements Restocker.Owner {
             return;
         }
 
-        // Near the water but nothing to fill from in view, walk to a spot on the bank once
-        BlockPos stand = findStandSpot(pool);
-        if (stand != null && !(stand.equals(pathTarget) && pathRange == 0)) {
+        // Baritone can call it done while we're still sliding, give it a moment before judging the view
+        if (++settleTicks < SETTLE_TICKS) return;
+        settleTicks = 0;
+
+        if (pool.stream().noneMatch(this::isTap)) {
+            failPool("none of the water there refills itself, each source needs at least 2 water sources beside it");
+            return;
+        }
+
+        // This bank spot didn't give us a look at the water, or Baritone stopped short of it. Try another one.
+        if (pathTarget != null && pathRange == 0) badStands.add(pathTarget);
+
+        BlockPos stand = standTries < MAX_STAND_TRIES ? findStandSpot(pool) : null;
+        if (stand != null) {
+            standTries++;
             goTo(stand, 0, State.GoingToWater);
             return;
         }
 
-        failPool();
+        // Every bank spot we stood on was a dud, or there was never one to begin with
+        failPool(badStands.isEmpty()
+            ? "there's nowhere on the bank to stand within reach of the water"
+            : "couldn't get a clear look at the water from the bank");
     }
 
-    private void failPool() {
+    private void failPool(String reason) {
         if (usingStation()) {
-            blockRefill("Couldn't refill at the station at %s, tilling dry land without water for now.", station.get().toShortString());
+            blockRefill("Couldn't refill at the station at %s: %s. Tilling dry land without water for now.", station.get().toShortString(), reason);
             nextErrand();
             return;
         }
@@ -1458,6 +1605,8 @@ public class AutoTill extends Module implements Restocker.Owner {
         // Try the next closest pool
         badPools.add(poolCorner);
         if (poolCorner.equals(knownPoolCorner)) knownPoolCorner = null;
+        badStands.clear();
+        standTries = 0;
 
         BlockPos corner = findPoolCorner();
         if (corner != null) {
@@ -1467,7 +1616,7 @@ public class AutoTill extends Module implements Restocker.Owner {
             return;
         }
 
-        blockRefill("Couldn't reach any 4x4 water source, tilling dry land without water for now.");
+        blockRefill("Couldn't fill up at any 4x4 water source (the last one: %s), tilling dry land without water for now.", reason);
         nextErrand();
     }
 
@@ -1589,7 +1738,7 @@ public class AutoTill extends Module implements Restocker.Owner {
                 if (water.contains(bank) || !mc.level.getFluidState(bank).isEmpty()) continue;
 
                 for (BlockPos feet : new BlockPos[] { bank.above(), bank, bank.above(2) }) {
-                    if (!isStandable(feet)) continue;
+                    if (badStands.contains(feet) || !isStandable(feet)) continue;
 
                     Vec3 eyes = Vec3.atBottomCenterOf(feet).add(0, mc.player.getEyeHeight(), 0);
                     if (taps.stream().noneMatch(t -> eyes.distanceTo(Vec3.atCenterOf(t)) <= range)) continue;
@@ -1665,19 +1814,37 @@ public class AutoTill extends Module implements Restocker.Owner {
             .toList();
 
         for (BlockPos p : taps) {
-            Vec3 aim = Vec3.atCenterOf(p);
-            Vec3 dir = aim.subtract(eyes);
-            if (dir.length() > range) continue;
+            for (Vec3 aim : fillAimPoints(p)) {
+                Vec3 dir = aim.subtract(eyes);
+                if (dir.length() > range) continue;
 
-            Vec3 end = eyes.add(dir.normalize().scale(range));
-            BlockHitResult hit = mc.level.clip(new ClipContext(eyes, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.SOURCE_ONLY, mc.player));
-            if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(p)) {
-                tap = p;
-                return aim;
+                Vec3 end = eyes.add(dir.normalize().scale(range));
+                BlockHitResult hit = mc.level.clip(new ClipContext(eyes, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.SOURCE_ONLY, mc.player));
+                if (hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().equals(p)) {
+                    tap = p;
+                    return aim;
+                }
             }
         }
 
         return null;
+    }
+
+    /**
+     * Points to aim a bucket at: the middle of the block, then just under the water's surface across the top. The
+     * edge of the bank often blocks the line to the middle while the near side of the surface is in plain view.
+     */
+    private List<Vec3> fillAimPoints(BlockPos p) {
+        Vec3 c = Vec3.atCenterOf(p);
+        double surface = p.getY() + 0.8;
+
+        List<Vec3> points = new ArrayList<>();
+        points.add(c);
+        points.add(new Vec3(c.x, surface, c.z));
+        for (Direction dir : HORIZONTALS) {
+            points.add(new Vec3(c.x + dir.getStepX() * 0.35, surface, c.z + dir.getStepZ() * 0.35));
+        }
+        return points;
     }
 
     private void fillBucket(BlockPos target) {
@@ -1759,7 +1926,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         if (autoSwitch.get()) return InvUtils.findInHotbar(predicate);
 
         if (predicate.test(mc.player.getOffhandItem())) return InvUtils.findInHotbar(predicate);
-        if (predicate.test(mc.player.getMainHandItem())) return new FindItemResult(mc.player.getInventory().getSelectedSlot(), 1);
+        if (predicate.test(mc.player.getMainHandItem())) return new FindItemResult(Players.selectedSlot(), 1);
         return new FindItemResult(-1, 0);
     }
 

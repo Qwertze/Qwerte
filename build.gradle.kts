@@ -1,11 +1,29 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.fabric.loom)
 }
 
+// Which Minecraft version to build for: ./gradlew build -Pmc=1.21.4. Each one has a versions/<mc>.properties file.
+val mc = (findProperty("mc") as String?) ?: "1.21.11"
+val target = Properties().apply {
+    val file = rootProject.file("versions/$mc.properties")
+    require(file.exists()) { "No versions/$mc.properties, supported versions are in the versions folder." }
+    file.reader().use { load(it) }
+}
+fun target(key: String) = target.getProperty(key)
+
 base {
     archivesName = properties["archives_base_name"] as String
-    version = libs.versions.mod.version.get()
+    version = "${libs.versions.mod.version.get()}+$mc"
     group = properties["maven_group"] as String
+}
+
+// Code that differs between Minecraft versions lives in src/<mc>/java
+sourceSets {
+    main {
+        java.srcDir("src/$mc/java")
+    }
 }
 
 repositories {
@@ -34,22 +52,22 @@ repositories {
 
 dependencies {
     // Fabric
-    minecraft(libs.minecraft)
+    minecraft("com.mojang:minecraft:${target("minecraft")}")
     mappings(loom.officialMojangMappings())
     modImplementation(libs.fabric.loader)
 
     // Meteor
-    modImplementation(libs.meteor.client)
+    modImplementation("meteordevelopment:meteor-client:${target("meteor")}")
 
     // Baritone (dekrom's fork, https://github.com/dekrom/baritone), optional at runtime
-    modCompileOnly(libs.baritone.api)
+    modCompileOnly("dekrom:baritone-api-fabric:${target("baritone")}")
 }
 
 tasks {
     processResources {
         val propertyMap = mapOf(
             "version" to project.version,
-            "mc_version" to libs.versions.minecraft.get()
+            "mc_version" to target("minecraft")
         )
 
         inputs.properties(propertyMap)

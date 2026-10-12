@@ -4,6 +4,7 @@ import baritone.api.BaritoneAPI;
 import baritone.api.IBaritone;
 import baritone.api.Settings;
 import baritone.api.pathing.goals.GoalNear;
+import com.porter.qwerte.compat.BaritoneFluids;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Block;
 
@@ -19,7 +20,7 @@ public final class BaritoneHelper {
     private static final List<Block> protectedBlocks = new ArrayList<>();
 
     // The user's own values, restored by unprotect()
-    private static Boolean placeInSource, placeInFlow, waterBucketFall;
+    private static Boolean waterBucketFall;
 
     private BaritoneHelper() {}
 
@@ -69,15 +70,11 @@ public final class BaritoneHelper {
         }
         settings.blocksToDisallowBreaking.value = disallowed;
 
-        if (placeInSource == null) {
-            placeInSource = settings.allowPlaceInFluidsSource.value;
-            placeInFlow = settings.allowPlaceInFluidsFlow.value;
+        if (waterBucketFall == null) {
             waterBucketFall = settings.allowWaterBucketFall.value;
-
-            settings.allowPlaceInFluidsSource.value = false;
-            settings.allowPlaceInFluidsFlow.value = false;
             settings.allowWaterBucketFall.value = false;
         }
+        BaritoneFluids.protect(settings);
     }
 
     /**
@@ -93,11 +90,10 @@ public final class BaritoneHelper {
             settings.blocksToDisallowBreaking.value = disallowed;
         }
 
-        if (placeInSource != null) {
-            settings.allowPlaceInFluidsSource.value = placeInSource;
-            settings.allowPlaceInFluidsFlow.value = placeInFlow;
+        if (waterBucketFall != null) {
             settings.allowWaterBucketFall.value = waterBucketFall;
-            placeInSource = placeInFlow = waterBucketFall = null;
+            waterBucketFall = null;
         }
+        BaritoneFluids.restore(settings);
     }
 }

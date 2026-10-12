@@ -11,8 +11,8 @@ Qwerte adds two modules to [Meteor Client](https://meteorclient.com):
 
 | | |
 |---|---|
-| **Minecraft** | 1.21.11 |
-| **Meteor Client** | 1.21.11 |
+| **Minecraft** | 1.21.11 or 1.21.4, each with its own jar |
+| **Meteor Client** | The build for your Minecraft version |
 | **Fabric Loader** | 0.18.2 or newer |
 | **Java** | 21 or newer |
 | **Optional** | [dekrom's Baritone fork](https://github.com/dekrom/baritone/releases) for walking, refilling and storage trips |
@@ -37,6 +37,8 @@ Both modules are in Meteor's **Farming** category. Every feature can be switched
 - Only digs where the water can't spill: solid on all four sides and underneath, and never the block you stand on.
 - Checks where the bucket will land right before using it, so water never ends up on the wrong block.
 - Holds dry land back from tilling until it's watered, so new farmland doesn't dry out.
+- **Fills holes in passing:** pours water into any empty 1x1 hole in reach that would water dry farmland or dirt, even
+  while Baritone is walking, so holes missed earlier get filled on the way past.
 
 #### Planting and bone meal
 - Plants your chosen seeds on empty farmland: wheat, beetroot, melon, pumpkin and torchflower seeds, carrots, potatoes
@@ -88,18 +90,31 @@ Both modules are in Meteor's **Farming** category. Every feature can be switched
 
 ## Installation
 
-1. Install [Fabric Loader](https://fabricmc.net/use/installer/) for Minecraft **1.21.11**.
-2. Put [Meteor Client](https://meteorclient.com) for 1.21.11 in your `mods` folder.
-3. Download the `qwerte-addon` jar from the [latest release](https://github.com/Qwertze/Qwerte/releases/latest) and
-   put it in your `mods` folder.
-4. *(Optional, for auto-walk and refilling)* Download `baritone-api-fabric-1.3.0-1.21.11.jar` from
-   [dekrom's Baritone releases](https://github.com/dekrom/baritone/releases/tag/v1.3.0-1.21.11) and put it in your
-   `mods` folder. Only have one Baritone jar installed at a time.
+1. Install [Fabric Loader](https://fabricmc.net/use/installer/) for Minecraft **1.21.11** or **1.21.4**.
+2. Put [Meteor Client](https://meteorclient.com) for the same Minecraft version in your `mods` folder.
+3. Download the `qwerte-addon` jar for your Minecraft version from the
+   [latest release](https://github.com/Qwertze/Qwerte/releases/latest): `qwerte-addon-<version>+1.21.11.jar` or
+   `qwerte-addon-<version>+1.21.4.jar`. Put it in your `mods` folder.
+4. *(Optional, for auto-walk and refilling)* Download `baritone-api-fabric-1.3.0-<minecraft>.jar` for your version from
+   [dekrom's Baritone releases](https://github.com/dekrom/baritone/releases) (for example
+   [1.21.11](https://github.com/dekrom/baritone/releases/tag/v1.3.0-1.21.11) or
+   [1.21.4](https://github.com/dekrom/baritone/releases/tag/v1.3.0-1.21.4)) and put it in your `mods` folder. Only have
+   one Baritone jar installed at a time.
 5. Start the game. Qwerte shows up under Meteor in Mod Menu, and the **auto-till** and **auto-dirt** modules are in
    Meteor's **Farming** category.
 
+> **On 1.21.4:** Baritone for 1.21.4 has no setting to stop it placing blocks in water, so Qwerte can't switch that off
+> during trips. Filling buckets from the bank still keeps pools intact; just keep an eye on your pool the first time.
+
 > **Updating:** close Minecraft before replacing the jar, and delete the old one. Swapping a mod's jar while the game is
 > running can crash it later.
+
+## Dev builds
+
+New features are tested on the [`dev`](https://github.com/Qwertze/Qwerte/tree/dev) branch before they reach `main`.
+Each round of testing gets a **pre-release** on the [releases page](https://github.com/Qwertze/Qwerte/releases), named
+like `v0.2.6-dev.1`. These are unofficial: they may be buggy and settings may change. Use the latest regular release
+unless you're helping test.
 
 ## Setup guide
 
@@ -175,6 +190,7 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | Planting | `seed-storage` | 0, 0, 0 | The container to restock from. |
 | Planting | `pick-storage` | off | Right-click a container to set it as the storage. |
 | Water | `auto-water` | on | Dig and fill water holes for dry land. |
+| Water | `fill-holes` | on | Fill empty 1x1 holes that would water dry land, even while walking. |
 | Water | `water-side-color` / `water-line-color` | magenta | Colors of the planned water hole. |
 | Automation | `auto-walk` | on | Walk to more land with Baritone. Turns itself off if Baritone isn't installed. |
 | Automation | `refill-water` | on | Walk to water and refill empty buckets. |
@@ -225,13 +241,15 @@ You need **JDK 21** or newer. Everything else, including Minecraft, Meteor and t
 ```sh
 git clone https://github.com/Qwertze/Qwerte.git
 cd Qwerte
-./gradlew build
+./gradlew build              # Minecraft 1.21.11
+./gradlew build -Pmc=1.21.4  # Minecraft 1.21.4
 ```
 
-On Windows use `gradlew.bat build`. The jar ends up in `build/libs/qwerte-addon-<version>.jar`.
+On Windows use `gradlew.bat` instead of `./gradlew`. The jar ends up in
+`build/libs/qwerte-addon-<version>+<minecraft>.jar`.
 
-To test in a development client, run `./gradlew runClient`. Baritone isn't included there; add its jar to `run/mods`
-if you want to try the automation.
+To test in a development client, run `./gradlew runClient`, adding `-Pmc=1.21.4` for 1.21.4. Baritone isn't included
+there; add its jar to `run/mods` if you want to try the automation.
 
 ### Project layout
 
@@ -244,9 +262,21 @@ src/main/java/com/porter/qwerte/
 │   └── Restocker.java        Storage and ender chest restocking, shared by both modules
 └── utils/
     └── BaritoneHelper.java   The only class that touches Baritone, loaded only when it's installed
+
+src/<minecraft>/java/com/porter/qwerte/compat/
+├── Players.java              The selected hotbar slot
+├── RightClick.java           Right clicks, for picking storages and stations
+└── BaritoneFluids.java       Keeping Baritone from placing blocks in water, where the version allows it
+
+versions/<minecraft>.properties   Minecraft, Meteor and Baritone versions for each supported Minecraft version
 ```
 
-Versions live in `gradle/libs.versions.toml`.
+Shared code is in `src/main`. The little that differs between Minecraft versions is in `src/<minecraft>`, and only the
+folder for the version being built is compiled. The addon version, Fabric Loader and Loom versions live in
+`gradle/libs.versions.toml`.
+
+To add another Minecraft version, add a `versions/<minecraft>.properties` and a `src/<minecraft>/java` folder with the
+three compat classes, then build with `-Pmc=<minecraft>`.
 
 ## License
 
