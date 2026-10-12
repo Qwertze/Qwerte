@@ -1,13 +1,15 @@
 # Qwerte
 A Meteor Addon For 2b2t Dedicated to Regrowing &amp; Creating Farmland
 
-Qwerte adds two modules to [Meteor Client](https://meteorclient.com):
+Qwerte adds three modules to [Meteor Client](https://meteorclient.com):
 
 - **Auto Till** turns nearby dirt and grass into farmland, digs and fills water holes so the farmland stays hydrated,
   plants and bone meals crops, and restocks its own seeds. With [Baritone](https://github.com/dekrom/baritone)
   installed it can also walk to new land and to water by itself, so a whole field can be built hands-free.
 - **Auto Dirt** covers the ground around you with dirt, so stone, sand or netherrack can be turned into farmland. It
   never places dirt on top of dirt, and restocks its own dirt.
+- **Stash Sorter** *(dev builds only, experimental)* sorts the chests and barrels around you, either into tiers or by
+  the signs on them.
 
 | | |
 |---|---|
@@ -19,7 +21,8 @@ Qwerte adds two modules to [Meteor Client](https://meteorclient.com):
 
 ## Features
 
-Both modules are in Meteor's **Farming** category. Every feature can be switched on and off on its own.
+Auto Till and Auto Dirt are in Meteor's **Farming** category, Stash Sorter is in **Storage**. Every feature can be
+switched on and off on its own.
 
 ### Auto Till
 
@@ -87,6 +90,29 @@ Both modules are in Meteor's **Farming** category. Every feature can be switched
 - **Storage** and **Ender Chest** modes, the same as seed restocking.
 - Can walk to a storage that's out of reach with Baritone, and back again.
 - Restocks before placing when you're low, and turns restocking off when the storage has run out of dirt.
+
+### Stash Sorter (experimental)
+
+#### Sorting
+- Finds the chests, trapped chests and barrels within `radius`, treating a double chest as one container, and opens
+  each one to see what's inside.
+- **Tiers mode** fills the containers nearest to where you turned it on first, in this order: filled shulkers, empty
+  shulkers, items that stack to 64, items that stack to 16, then singles and everything else.
+- **Signs mode** reads the signs on the side of each container or standing on top of it. Each sign line can be:
+  - an exact item name, like `Diamond Block`, which wins over everything else
+  - words, like `diamonds` or `ores`, which match any item with those words in its name
+  - a category: `shulkers`, `food`, `tools`, `weapons`, `armor`, `blocks`, `logs`, `x64`, `x16` or `singles`
+  - a catch-all: `misc`, `other`, `overflow` or `*`, for anything no other sign claims
+
+  Each item goes to the container whose signs describe it best. Items no sign describes stay where they are.
+
+#### How it moves items
+- Carries items only in the inventory slots that were empty when you turned it on, so your own items are never
+  touched or mixed in.
+- When the container an item belongs in is full, it swaps the item with something in there that belongs elsewhere, so
+  a stash where every container is full can still be sorted.
+- Only picks up what it has somewhere to put, and puts anything it ends up stuck holding into a container with space.
+- Can walk to containers out of reach with Baritone.
 
 ## Installation
 
@@ -164,6 +190,12 @@ around. The purple boxes are the blocks it's about to till.
    restocking. Turn on **walk-to-storage** if your dirt storage is out of reach.
 4. Turn on **auto-till** too to till the new dirt as it goes down.
 
+### Sorting a stash
+1. Empty some inventory slots. The more free slots, the fewer trips it makes.
+2. For **Signs** mode, put signs on your containers with what goes in each, one category or item per line.
+3. Stand among the containers, open **stash-sorter** in the **Storage** category, pick a **mode** and turn it on. It
+   reads every container first, then sorts, and turns itself off when it's done.
+
 ## Settings reference
 
 The defaults are a tuned setup that works well on 2b2t, so most people only need to set their seed storage or refill
@@ -234,6 +266,22 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | Render | `shape-mode` | Both | How the highlight is drawn. |
 | Render | `side-color` / `line-color` | brown | Colors of the highlight. |
 
+### stash-sorter
+
+| Group | Setting | Default | Description |
+|---|---|---|---|
+| General | `mode` | Tiers | Tiers or Signs. |
+| General | `radius` | 8 | How far around you to look for containers. |
+| General | `height` | 3 | How far above and below you to look. |
+| General | `barrels` | on | Sort barrels as well as chests. |
+| General | `reach` | 4.5 | How close a container has to be to open it. |
+| General | `delay` | 3 | Ticks between inventory clicks. Raise it if the server rejects clicks. |
+| General | `walk` | off | Walk to containers out of reach with Baritone. |
+| General | `rotate` | on | Face containers when opening them. |
+| Render | `render` | on | Highlight the container being worked on. |
+| Render | `shape-mode` | Both | How the highlight is drawn. |
+| Render | `side-color` / `line-color` | orange | Colors of the highlight. |
+
 ## Building from source
 
 You need **JDK 21** or newer. Everything else, including Minecraft, Meteor and the Baritone API, is downloaded by Gradle.
@@ -255,11 +303,12 @@ there; add its jar to `run/mods` if you want to try the automation.
 
 ```
 src/main/java/com/porter/qwerte/
-├── QwerteAddon.java          Addon entrypoint, registers the Farming category and modules
+├── QwerteAddon.java          Addon entrypoint, registers the Farming and Storage categories and modules
 ├── modules/
 │   ├── AutoTill.java         The auto-till module: tilling, watering, planting, automation
 │   ├── AutoDirt.java         The auto-dirt module: covering ground with dirt
-│   └── Restocker.java        Storage and ender chest restocking, shared by both modules
+│   ├── StashSorter.java      The stash-sorter module: sorting containers by tier or sign
+│   └── Restocker.java        Storage and ender chest restocking, shared by auto-till and auto-dirt
 └── utils/
     └── BaritoneHelper.java   The only class that touches Baritone, loaded only when it's installed
 

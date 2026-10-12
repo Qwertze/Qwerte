@@ -3,6 +3,7 @@ package com.porter.qwerte;
 import com.mojang.logging.LogUtils;
 import com.porter.qwerte.modules.AutoDirt;
 import com.porter.qwerte.modules.AutoTill;
+import com.porter.qwerte.modules.StashSorter;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
 import meteordevelopment.meteorclient.systems.modules.Category;
@@ -12,6 +13,7 @@ import org.slf4j.Logger;
 public class QwerteAddon extends MeteorAddon {
     public static final Logger LOG = LogUtils.getLogger();
     public static final Category CATEGORY = new Category("Farming");
+    public static final Category STORAGE = new Category("Storage");
 
     @Override
     public void onInitialize() {
@@ -20,11 +22,13 @@ public class QwerteAddon extends MeteorAddon {
         // Modules
         Modules.get().add(new AutoTill());
         Modules.get().add(new AutoDirt());
+        Modules.get().add(new StashSorter());
     }
 
     @Override
     public void onRegisterCategories() {
         Modules.registerCategory(CATEGORY);
+        Modules.registerCategory(STORAGE);
     }
 
     @Override
