@@ -7,9 +7,11 @@ Qwerte adds four modules to [Meteor Client](https://meteorclient.com):
   plants and bone meals crops, and restocks its own seeds. With [Baritone](https://github.com/dekrom/baritone)
   installed it can also walk to new land and to water by itself, so a whole field can be built hands-free.
 - **Auto Dirt** covers the ground around you with dirt, so stone, sand or netherrack can be turned into farmland. It
-  never places dirt on top of dirt, and restocks its own dirt.
+  never places dirt on top of dirt, and restocks its own dirt. With Baritone installed it can also walk to uncovered
+  ground by itself.
 - **Stash Sorter** sorts the chests and barrels around you, either into tiers or by the signs on them. It repacks
-  mixed shulkers, merges partial stacks, empties drop-off chests and can be searched. Want it on a proxy bot instead?
+  mixed shulkers, merges partial stacks, empties drop-off chests, builds saved kits and can be searched. Want it on a
+  proxy bot instead?
   See [Stash Sorter for AquariusProxy](https://github.com/Qwertze/Stash-Sorter).
 - **Stash Overlay** shows what each container in a saved stash mostly holds, as an item icon on the container.
 
@@ -53,14 +55,16 @@ switched on and off on its own.
 
 #### Seed restocking
 - **Storage mode:** takes seeds from a chest, barrel or any other container you pick, walking there and back with
-  Baritone if it's out of reach.
+  Baritone if it's out of reach. You can add several storages.
 - **Ender Chest mode:** places your ender chest, takes the shulker holding the most of your seeds, places and empties
   the shulker into your inventory, breaks it, puts it back in the exact ender chest slot it came from, then breaks the
   ender chest with a silk touch pickaxe and picks it back up. It checks Meteor's memory of your ender chest first, keeps
   a slot free for the shulker, and always puts everything back even if something goes wrong.
 - Restocks before doing anything else when you're low, so it never tills land it has nothing to plant on.
-- Notices when the storage, or every shulker in your ender chest, has run out of seeds, and turns seed restocking off
-  with a message instead of trying again and again.
+- **Several storages:** storages are tried in reach first, then nearest. It moves on when one is empty or can't be
+  reached, and tops up from the next one if it's still low.
+- Notices when all the storages, or every shulker in your ender chest, has run out of seeds, and turns seed restocking
+  off with a message instead of trying again and again. Turn seed restocking back on after refilling.
 
 #### Automation (needs Baritone)
 - **Auto walk:** when nothing is left in reach, walks to the nearest untilled land within a radius of where you turned
@@ -71,7 +75,7 @@ switched on and off on its own.
 - Stands on the bank to fill, and turns off Baritone's block placing in water while it drives, so pools aren't filled
   in on the way out.
 - Keeps Baritone from breaking your farmland or using your water buckets to break falls. Your own Baritone settings
-  are restored when the module turns off.
+  are restored when the module turns off, and Baritone is stopped and reset when you leave a server.
 - Remembers the last pool it used, recovers when Baritone stalls, and puts your held item back after every trip.
 - **Combined trips:** after filling buckets it restocks seeds before walking back if you're running low, and after a
   seed trip it refills any empty buckets, so one trip covers both.
@@ -90,8 +94,17 @@ switched on and off on its own.
 
 #### Dirt restocking
 - **Storage** and **Ender Chest** modes, the same as seed restocking.
+- **Several storages:** storages are tried in reach first, then nearest. It moves on when one is empty or can't be
+  reached, and tops up from the next one if it's still low.
 - Can walk to a storage that's out of reach with Baritone, and back again.
-- Restocks before placing when you're low, and turns restocking off when the storage has run out of dirt.
+- Restocks before placing when you're low, and turns restocking off only when all the storages have run out of dirt.
+  Turn restocking back on after refilling.
+
+#### Automation (needs Baritone)
+- **Auto walk** (off by default): when nothing is left in reach, walks to the nearest uncovered ground within
+  `search-radius` of where you turned the module on, searching `search-height` blocks up and down. It skips spots it
+  can't reach or place on, and says "No more ground to cover" when there's none left.
+- Keeps Baritone off farmland while it walks, and stops and resets Baritone when you leave a server.
 
 ### Stash Sorter
 
@@ -162,6 +175,31 @@ anywhere else, and doesn't stop repacking.
 Once everything is in place, partial stacks of the same item in each container are merged ("downstacked"), so a
 chest with three stacks of 20 cobblestone ends up with one of 60.
 
+#### Kits
+A kit is a set of items packed together in one shulker, slot for slot with the same counts, like a PvP kit.
+
+- **Saving:** put the kit in your 27 main inventory slots (not the hotbar, offhand or armor), type a name in the **Kits**
+  section of the module's settings and press **Save kit**. The name needs letters or numbers, must be unique on the
+  server (case and punctuation don't count), and a kit can't contain shulker boxes.
+- **The list:** each kit shows its slot count, how many are built and how many more the stash could build. **View**
+  opens a look-only preview. Click the minus twice to delete a kit.
+- Kits are saved per server in `meteor-client/qwerte/kits/`. A file that this version can't read (for example one saved
+  on the other Minecraft version) is kept untouched and its kits are unavailable. A file that can't be read at all is
+  moved aside as `<server>.corrupt-<time>.nbt`.
+- **Building** with `build-kits` (off by default, Signs mode only): it builds as many copies as the stash allows. It
+  takes an empty shulker, preferring boxes signed "empty shulkers", gathers the items and fills the shulker with the
+  exact saved counts. Durability and anvil cost are ignored, but everything else must match: names, enchantments,
+  potions and trims.
+- **Where kits go:** a finished kit goes to the chest whose sign is the kit's name, "<name> kit" or "<name> kits". With
+  no such chest the kit isn't built, and the chat says so once.
+- **Kit chests are reserved:** a sign naming a kit's chest keeps loose items out of it, even with `build-kits` off. So
+  don't name kits after categories, like `pvp` or `totems`.
+- Finished kits are never unpacked or topped up, and neither is a part-built kit holding more than one kind of item. A
+  part-built kit in its own chest is carried on with. A part-built kit holding only one kind of item, outside its kit's
+  chest, is treated as an ordinary bulk shulker.
+- Each step makes up to two inventory clicks, then waits `delay` ticks. Raise `delay` if the server complains about
+  clicks.
+
 #### Excluded and drop-off containers
 - Set `pick` to **Exclude** and right-click containers it should never sort into or out of. Right-click again to undo.
 - Set `pick` to **Drop-off** and right-click containers to empty into the stash, for example a chest where friends
@@ -201,8 +239,8 @@ chest with three stacks of 20 cobblestone ends up with one of 60.
 1. Install [Fabric Loader](https://fabricmc.net/use/installer/) for Minecraft **1.21.11** or **1.21.4**.
 2. Put [Meteor Client](https://meteorclient.com) for the same Minecraft version in your `mods` folder.
 3. Download the `qwerte-addon` jar for your Minecraft version from the
-   [latest release](https://github.com/Qwertze/Qwerte/releases/latest): `qwerte-addon-<version>+1.21.11.jar` or
-   `qwerte-addon-<version>+1.21.4.jar`. Put it in your `mods` folder.
+   [latest release](https://github.com/Qwertze/Qwertze/releases/latest): `qwerte-addon-0.2.7+1.21.11.jar` or
+   `qwerte-addon-0.2.7+1.21.4.jar`. Put it in your `mods` folder.
 4. *(Optional, for auto-walk and refilling)* Download `baritone-api-fabric-1.3.0-<minecraft>.jar` for your version from
    [dekrom's Baritone releases](https://github.com/dekrom/baritone/releases) (for example
    [1.21.11](https://github.com/dekrom/baritone/releases/tag/v1.3.0-1.21.11) or
@@ -219,9 +257,9 @@ chest with three stacks of 20 cobblestone ends up with one of 60.
 
 ## Dev builds
 
-New features are tested on the [`dev`](https://github.com/Qwertze/Qwerte/tree/dev) branch before they reach `main`.
-Each round of testing gets a **pre-release** on the [releases page](https://github.com/Qwertze/Qwerte/releases), named
-like `v0.2.6-dev.1`. These are unofficial: they may be buggy and settings may change. Use the latest regular release
+New features are tested on the [`dev`](https://github.com/Qwertze/Qwertze/tree/dev) branch before they reach `main`.
+Each round of testing gets a **pre-release** on the [releases page](https://github.com/Qwertze/Qwertze/releases), named
+like `v0.2.7-dev.1`. These are unofficial: they may be buggy and settings may change. Use the latest regular release
 unless you're helping test.
 
 ## Setup guide
@@ -247,8 +285,8 @@ around. The purple boxes are the blocks it's about to till.
 ### Seed restocking
 1. Turn on **seed-restock** and set **restock-at** (default 1; 0 means restock only once you've run out).
 2. Pick a **restock-mode**:
-   - **Storage:** turn on **pick-storage** and right-click your seed chest, or type its coordinates into
-     **seed-storage**. If it's out of reach you'll need auto-walk on.
+   - **Storage:** turn on **pick-storage** and right-click each seed chest you want to use. Right-click one again to
+     remove it. The storages are listed under the module's settings. If one is out of reach you'll need auto-walk on.
    - **Ender Chest:** keep an ender chest and a silk touch pickaxe on you, with a shulker of seeds stored in your ender
      chest. Keep at least 2 inventory slots free. If Meteor has already seen inside your ender chest, Qwerte checks for
      a seed shulker before placing anything; otherwise it checks once the chest is open.
@@ -271,6 +309,8 @@ around. The purple boxes are the blocks it's about to till.
 3. To restock, turn on **restock** in the **Restock** group and pick a **restock-mode**, set up the same way as seed
    restocking. Turn on **walk-to-storage** if your dirt storage is out of reach.
 4. Turn on **auto-till** too to till the new dirt as it goes down.
+5. *(Optional, needs Baritone)* Turn on **auto-walk** in the **Automation** group and set **search-radius** to how far
+   from where you start to look for ground to cover.
 
 ### Sorting a stash
 1. Empty some inventory slots, or set `carry-slots`. The more slots, the fewer trips.
@@ -282,6 +322,8 @@ around. The purple boxes are the blocks it's about to till.
 5. Turn on `stay-on` to keep it running as a sorting bot.
 6. Search the stash anytime from the module's settings.
 7. Turn on **stash-overlay** to see what each container holds.
+8. *(Optional)* To build kits, save them in the **Kits** section of the module's settings, put a chest signed with each
+   kit's name, then turn on `build-kits` in Signs mode.
 
 ## Settings reference
 
@@ -306,8 +348,8 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | Planting | `seed-restock` | off | Restock seeds when low. |
 | Planting | `restock-mode` | Storage | Storage or Ender Chest. |
 | Planting | `restock-at` | 1 | Restock at this many seeds or fewer. |
-| Planting | `seed-storage` | 0, 0, 0 | The container to restock from. |
-| Planting | `pick-storage` | off | Right-click a container to set it as the storage. |
+| Planting | `seed-storages` | empty | The containers to restock from, managed with `pick-storage` and the list in the module's settings. |
+| Planting | `pick-storage` | off | Right-click a container to add it as a storage, or remove it if it's already one. |
 | Water | `auto-water` | on | Dig and fill water holes for dry land. |
 | Water | `fill-holes` | on | Fill empty 1x1 holes that would water dry land, even while walking. |
 | Water | `water-side-color` / `water-line-color` | magenta | Colors of the planned water hole. |
@@ -339,16 +381,19 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | General | `below-feet-only` | on | Only cover ground below your feet. |
 | General | `depth` | 1 | How far below your feet to look for ground. |
 | General | `skip-own-column` | on | Leave the block you're standing on uncovered. |
-| General | `ignore` | chests, barrel, crafting table, furnace | Blocks never covered. |
+| General | `ignore` | chests, trapped chests, ender chests, barrel, crafting table, furnace | Blocks never covered. |
 | General | `rotate` | off | Face the block being placed against. |
 | General | `swap-back` | on | Switch back to your previous slot afterwards. |
 | General | `disable-when-out` | on | Turn off when out of dirt and unable to restock. |
 | Restock | `restock` | off | Restock dirt when low. |
 | Restock | `restock-mode` | Storage | Storage or Ender Chest. |
 | Restock | `restock-at` | 0 | Restock at this much dirt or less. |
-| Restock | `dirt-storage` | 0, 0, 0 | The container to restock from. |
-| Restock | `pick-storage` | off | Right-click a container to set it as the storage. |
+| Restock | `dirt-storages` | empty | The containers to restock from, managed with `pick-storage` and the list in the module's settings. |
+| Restock | `pick-storage` | off | Right-click a container to add it as a storage, or remove it if it's already one. |
 | Restock | `walk-to-storage` | off | Walk to an out-of-reach storage with Baritone. |
+| Automation | `auto-walk` | off | Walk to more uncovered ground with Baritone. Turns itself off if Baritone isn't installed. |
+| Automation | `search-radius` | 64 | How far from where you enabled the module to look for ground to cover. |
+| Automation | `search-height` | 1 | How far up and down to look for ground. |
 | Render | `render` | on | Highlight the spots about to be filled. |
 | Render | `shape-mode` | Both | How the highlight is drawn. |
 | Render | `side-color` / `line-color` | brown | Colors of the highlight. |
@@ -369,6 +414,7 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | General | `rotate` | on | Face containers when opening them. |
 | Shulkers | `repack` | on | Signs mode: clean mixed shulkers and pack loose items into bulk shulkers. |
 | Shulkers | `new-bulk-at` | 9 | Start a new bulk shulker from an empty one at this many stacks of one item. 0 only tops up existing ones. |
+| Kits | `build-kits` | off | Signs mode only: build the saved kits out of the stash, into chests signed with the kit's name. |
 | Bot | `stay-on` | off | Keep running after sorting, as a sorting bot. |
 | Bot | `recheck` | 30 | Seconds between drop-off checks. |
 | Slots | `carry-slots` | blank | Slots to carry items in. Blank uses every empty slot. |
@@ -397,8 +443,8 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 You need **JDK 21** or newer. Everything else, including Minecraft, Meteor and the Baritone API, is downloaded by Gradle.
 
 ```sh
-git clone https://github.com/Qwertze/Qwerte.git
-cd Qwerte
+git clone https://github.com/Qwertze/Qwertze.git
+cd Qwertze
 ./gradlew build              # Minecraft 1.21.11
 ./gradlew build -Pmc=1.21.4  # Minecraft 1.21.4
 ```
@@ -417,15 +463,20 @@ src/main/java/com/porter/qwerte/
 ├── modules/
 │   ├── AutoTill.java         The auto-till module: tilling, watering, planting, automation
 │   ├── AutoDirt.java         The auto-dirt module: covering ground with dirt
-│   ├── StashSorter.java      The stash-sorter module: sorting, bot mode, picking, search
+│   ├── StashSorter.java      The stash-sorter module: sorting, kits, bot mode, picking, search
+│   ├── KitBuilder.java       Building saved kits out of the stash, for stash-sorter
 │   ├── StashOverlay.java     The stash-overlay module: an icon of each container's main item
-│   └── Restocker.java        Storage and ender chest restocking, shared by auto-till and auto-dirt
+│   ├── Restocker.java        Storage and ender chest restocking, shared by auto-till and auto-dirt
+│   └── StorageList.java      The list of storages a module restocks from, in the order it tries them
 ├── stash/
 │   ├── Stash.java            A saved stash: its containers and contents, saving, loading and search
 │   ├── Categories.java       What sign words and searches mean: categories, slang and synonyms
-│   └── ItemPreviewScreen.java  Shows a found item in a look-only container screen
+│   ├── Kit.java              A saved kit: 27 slots, and how to tell if a shulker is finished or part built
+│   ├── Kits.java             The saved kits of the current server, saved and loaded from disk
+│   ├── ItemPreviewScreen.java  Shows a found item in a look-only container screen
+│   └── KitPreviewScreen.java   Shows a saved kit in a look-only container screen
 └── utils/
-    └── BaritoneHelper.java   The only class that touches Baritone, loaded only when it's installed
+    └── BaritoneHelper.java   The main class that calls Baritone, used only when it's installed
 
 src/<minecraft>/java/com/porter/qwerte/compat/
 ├── Players.java              The selected hotbar slot
