@@ -336,7 +336,7 @@ public class StashSorter extends Module {
         Pattern.compile("^(\\w{3,16}) -> (?:me|you): (.+)$")
     };
 
-    private enum Job { Survey, Take, Deposit, Dump, Fetch, Clean, Fill }
+    private enum Job { Survey, Take, Deposit, Dump, Fetch, Clean, Fill, Compact }
 
     private enum Step { Walking, Opening, Working }
 
@@ -365,6 +365,7 @@ public class StashSorter extends Module {
 
     // Containers where the last job got nothing done, skipped until something moves somewhere else
     private final Set<Box> stalled = new HashSet<>();
+    private final Set<Box> compacted = new HashSet<>();
     private int actions;
 
     // Repacking
@@ -414,6 +415,7 @@ public class StashSorter extends Module {
         wait = 0;
         idle = false;
         stalled.clear();
+        compacted.clear();
         tierBoxes.clear();
         handle = null;
         repackFailed = false;
@@ -588,6 +590,7 @@ public class StashSorter extends Module {
         if (version != seenVersion) {
             seenVersion = version;
             stalled.clear();
+            compacted.clear();
             packTried.clear();
             idle = false;
             return true;
@@ -651,6 +654,13 @@ public class StashSorter extends Module {
 
         Box source = nearest(stash.boxes.stream().filter(b -> b.sortable() && !stalled.contains(b) && takeableSlot(b) != -1).toList());
         if (source != null) return start(Job.Take, source);
+
+        // Downstack: merge partial stacks of the same item, once per container per run
+        Box messy = nearest(stash.boxes.stream().filter(b -> b.sortable() && !b.dropOff && !stalled.contains(b) && !compacted.contains(b) && mergeable(b) != null).toList());
+        if (messy != null) {
+            compacted.add(messy);
+            return start(Job.Compact, messy);
+        }
 
         finishSorting();
         return false;
@@ -733,8 +743,8 @@ public class StashSorter extends Module {
         ItemStack main = Categories.dominantContent(shulker);
         if (main == null) return List.of();
 
-        // A sign asks for shulkers as they are, like "kits" or "full shulkers"
-        if (!bestSigned(shulker).isEmpty()) return List.of();
+        // A chest signed for kits takes mixed shulkers whole instead
+        if (!keepWholeBoxes().isEmpty()) return List.of();
 
         List<Integer> out = new ArrayList<>();
         ItemStack[] inside = inside(shulker);
@@ -1194,6 +1204,7 @@ public class StashSorter extends Module {
             case Survey, Clean, Fill -> false;
             case Take -> takeOne();
             case Fetch -> fetchOne();
+            case Compact -> compactOne();
             case Deposit -> depositOne();
             case Dump -> dumpOne();
         };
@@ -1391,6 +1402,12 @@ public class StashSorter extends Module {
 
         // A shulker goes where what it's mostly full of goes: a shulker of totems belongs with the totems. Only when
         // no sign describes its contents does it fall back to signs about shulkers themselves, like "shulkers" or "kits".
+        // Mixed shulkers go whole to a chest signed for kits, when there is one
+        if (mixedShulker(stack)) {
+            List<Box> kits = keepWholeBoxes();
+            if (!kits.isEmpty()) return kits;
+        }
+
         ItemStack inside = Categories.dominantContent(stack);
         if (inside != null) {
             List<Box> byContents = bestSigned(inside);
@@ -1447,6 +1464,56 @@ public class StashSorter extends Module {
         int free = 0;
         for (Box box : stash.boxes) if (box != except && box.sortable() && !box.dropOff) free += box.free();
         return free - carriedSlots().size();
+    }
+
+    /**
+     * Two partial stacks of the same item in this container, {first, second}, or null if there are none to merge.
+     */
+    private static int[] mergeable(Box box) {
+        ItemStack[] c = box.contents;
+        for (int i = 0; i < c.length; i++) {
+            ItemStack a = c[i];
+            if (a.isEmpty() || a.getMaxStackSize() <= 1 || a.getCount() >= a.getMaxStackSize()) continue;
+            for (int j = c.length - 1; j > i; j--) {
+                ItemStack b = c[j];
+                if (!b.isEmpty() && ItemStack.isSameItemSameComponents(a, b) && b.getCount() < b.getMaxStackSize()) return new int[] {i, j};
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Merges one later partial stack into an earlier one: pick it up, drop it on the earlier stack, put back what's left.
+     */
+    private boolean compactOne() {
+        int[] pair = mergeable(target);
+        if (pair == null) return false;
+
+        InvUtils.click().slotId(pair[1]);
+        InvUtils.click().slotId(pair[0]);
+        if (!mc.player.containerMenu.getCarried().isEmpty()) InvUtils.click().slotId(pair[1]);
+        return true;
+    }
+
+    /**
+     * Chests signed for kits, which take mixed shulkers whole.
+     */
+    private List<Box> keepWholeBoxes() {
+        return stash.boxes.stream().filter(b -> b.sortable() && !b.dropOff && b.labels.stream().anyMatch(Categories::isKeepWhole)).toList();
+    }
+
+    /**
+     * A shulker holding more than one kind of item.
+     */
+    private static boolean mixedShulker(ItemStack stack) {
+        if (stack.isEmpty() || !Utils.isShulker(stack.getItem())) return false;
+        Item first = null;
+        for (ItemStack s : inside(stack)) {
+            if (s == null || s.isEmpty()) continue;
+            if (first == null) first = s.getItem();
+            else if (s.getItem() != first) return true;
+        }
+        return false;
     }
 
     private int misplacedCount(Box box) {
