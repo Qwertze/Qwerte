@@ -8,6 +8,7 @@ import com.porter.qwerte.stash.Stash;
 import com.porter.qwerte.stash.Stash.Box;
 import com.porter.qwerte.utils.BaritoneHelper;
 import meteordevelopment.meteorclient.MeteorClient;
+import meteordevelopment.meteorclient.events.entity.player.InteractBlockEvent;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
@@ -33,6 +34,7 @@ import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.component.DataComponentMap;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
@@ -360,6 +362,8 @@ public class StashSorter extends Module {
     private int wait;
     private int swapStep;
     private int swapCarry, swapSlot;
+    private int recoveries;
+    private ItemStack swapStack = ItemStack.EMPTY, swapDisplaced = ItemStack.EMPTY;
     private boolean usedBaritone;
     private int moved;
 
@@ -392,6 +396,17 @@ public class StashSorter extends Module {
     // Containers the player opens themselves
     private AbstractContainerMenu trackedMenu;
     private Box trackedBox;
+
+    // The last block interact sent, so a menu is only filed under the box it was really opened from
+    private static final int INTERACT_WINDOW = 20 * 5;
+    private int clock;
+    private BlockPos interactPos;
+    private AbstractContainerMenu interactMenu;
+    private int interactClock;
+
+    // The sorter's own open click, same idea
+    private BlockPos openPos;
+    private AbstractContainerMenu openMenuBefore;
 
     private final Queue<String> replies = new ArrayDeque<>();
     private int replyCooldown;
@@ -605,10 +620,39 @@ public class StashSorter extends Module {
      * @return false when there's nothing left to do
      */
     private boolean nextJob() {
+        try {
+            return pickJob();
+        } finally {
+            destCache = null;
+            misplacedCache = null;
+        }
+    }
+
+    /**
+     * Per-planning-pass memos, only set while nextJob is choosing. Nothing that destinationsFor or misplacedCount read
+     * (box contents, labels, flags, mode, tier boxes) changes during a pass, so within it equal inputs give equal
+     * answers. Dropped when the pass ends, so later changes can never be served stale.
+     */
+    private Map<DestKey, List<Box>> destCache;
+    private Map<Box, Integer> misplacedCache;
+
+    /**
+     * What destinationsFor and Categories.signScore depend on in a stack: its item and components (name, enchants,
+     * potion, food, damage, shulker contents...), not its count.
+     */
+    private record DestKey(Item item, DataComponentMap components) {
+        static DestKey of(ItemStack stack) {
+            return new DestKey(stack.getItem(), stack.getComponents());
+        }
+    }
+
+    private boolean pickJob() {
         Box unread = nearest(stash.boxes.stream().filter(b -> !b.known() && !b.unreachable).toList());
         if (unread != null) return start(Job.Survey, unread);
 
         plan();
+        destCache = new HashMap<>();
+        misplacedCache = new HashMap<>();
 
         if (repackOn() && nextRepackJob()) return true;
 
@@ -1111,6 +1155,9 @@ public class StashSorter extends Module {
         target = box;
         swapStep = 0;
         actions = 0;
+        recoveries = 0;
+        openPos = null;
+        openMenuBefore = null;
 
         if (inReach(box)) {
             step = Step.Opening;
@@ -1133,7 +1180,18 @@ public class StashSorter extends Module {
     }
 
     private void finishJob() {
-        if (mc.player.containerMenu != mc.player.inventoryMenu) mc.player.closeContainer();
+        if (mc.player.containerMenu != mc.player.inventoryMenu) {
+            // Never close with something on the cursor, it would be merged into the inventory or dropped
+            if (!mc.player.containerMenu.getCarried().isEmpty() && !recoverCursor()) {
+                error("Couldn't put away the stack on the cursor, no free slot. Stopping, and the stack may be dropped when the container closes.");
+                toggle();
+                return;
+            }
+            mc.player.closeContainer();
+        }
+        openPos = null;
+        openMenuBefore = null;
+        recoveries = 0;
 
         // Opened it and got nothing done: don't keep coming back while nothing else changes
         if (job != null && job != Job.Survey && target != null && !target.unreachable) {
@@ -1166,12 +1224,20 @@ public class StashSorter extends Module {
     }
 
     private void tickOpening() {
-        if (mc.player.containerMenu instanceof ChestMenu) {
-            step = Step.Working;
-            stepTicks = 0;
-            read(target);
-            wait = delay.get();
-            return;
+        AbstractContainerMenu open = mc.player.containerMenu;
+        if (open != mc.player.inventoryMenu) {
+            // Only the menu our own click opened, of the size this box has. Anything else (an ender chest, a plugin
+            // GUI, one left over from an earlier click) is closed and the click retried
+            if (openPos != null && open != openMenuBefore && open instanceof ChestMenu && open.slots.size() - 36 == target.parts.size() * 27) {
+                step = Step.Working;
+                stepTicks = 0;
+                read(target);
+                wait = delay.get();
+                return;
+            }
+
+            if (!open.getCarried().isEmpty()) recoverCursor();
+            mc.player.closeContainer();
         }
 
         if (stepTicks > OPEN_TIMEOUT) {
@@ -1183,7 +1249,11 @@ public class StashSorter extends Module {
         if (stepTicks == 1 || stepTicks % 20 == 0) {
             BlockPos pos = nearestPart(target);
             BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(pos), Direction.UP, pos, false);
-            Runnable click = () -> BlockUtils.interact(hit, InteractionHand.MAIN_HAND, true);
+            Runnable click = () -> {
+                openPos = pos;
+                openMenuBefore = mc.player.containerMenu;
+                BlockUtils.interact(hit, InteractionHand.MAIN_HAND, true);
+            };
 
             if (rotate.get()) Rotations.rotate(Rotations.getYaw(pos), Rotations.getPitch(pos), click);
             else click.run();
@@ -1192,8 +1262,8 @@ public class StashSorter extends Module {
 
     private void tickWorking() {
         AbstractContainerMenu menu = mc.player.containerMenu;
-        if (!(menu instanceof ChestMenu)) {
-            // Closed on us, by the server or the player
+        if (!(menu instanceof ChestMenu) || menu.slots.size() - 36 != target.parts.size() * 27) {
+            // Closed on us, or swapped for something else, by the server or the player
             finishJob();
             return;
         }
@@ -1291,7 +1361,15 @@ public class StashSorter extends Module {
         int size = target.contents.length;
 
         // Mid-swap: carried stack on the cursor, then into the slot, then what was there back into the carry slot
+        ItemStack carried = mc.player.containerMenu.getCarried();
         if (swapStep > 0) {
+            // The cursor must hold what the last click should have left on it, otherwise a click was rejected
+            ItemStack expected = swapStep == 1 ? swapStack : swapDisplaced;
+            if (!ItemStack.matches(carried, expected)) {
+                swapStep = 0;
+                return recoverBounded();
+            }
+
             if (swapStep == 1) InvUtils.click().slotId(swapSlot);
             else InvUtils.click().slotId(inventoryToMenu(swapCarry, size));
 
@@ -1299,6 +1377,9 @@ public class StashSorter extends Module {
             if (swapStep == 0) moved++;
             return true;
         }
+
+        // A stack left on the cursor by an earlier hiccup goes away before anything else is clicked
+        if (!carried.isEmpty()) return recoverBounded();
 
         for (int slot : carriedSlots()) {
             ItemStack stack = mc.player.getInventory().getItem(slot);
@@ -1316,12 +1397,53 @@ public class StashSorter extends Module {
 
                 swapCarry = slot;
                 swapSlot = i;
+                swapStack = stack.copy();
+                swapDisplaced = here.copy();
                 swapStep = 1;
                 InvUtils.click().slotId(inventoryToMenu(slot, size));
                 return true;
             }
         }
 
+        return false;
+    }
+
+    /**
+     * recoverCursor, but gives up after a few tries in one job, so a click the server keeps rejecting can't loop forever.
+     * Giving up counts as getting nothing done, so the box is skipped until something else moves.
+     */
+    private boolean recoverBounded() {
+        if (++recoveries > 3) {
+            actions = 0;
+            return false;
+        }
+        return recoverCursor();
+    }
+
+    /**
+     * Puts whatever is on the cursor into an empty slot, the player's own slots first.
+     * @return false if there's nothing to put it in
+     */
+    private boolean recoverCursor() {
+        AbstractContainerMenu menu = mc.player.containerMenu;
+        if (menu.getCarried().isEmpty()) return true;
+
+        int size = menu.slots.size() - 36;
+        for (int i = size; i < menu.slots.size(); i++) {
+            if (menu.getSlot(i).getItem().isEmpty()) {
+                InvUtils.click().slotId(i);
+                return true;
+            }
+        }
+        // Only into the container we're working on, never some other menu
+        if (target != null && menu instanceof ChestMenu && size == target.parts.size() * 27) {
+            for (int i = 0; i < size; i++) {
+                if (menu.getSlot(i).getItem().isEmpty()) {
+                    InvUtils.click().slotId(i);
+                    return true;
+                }
+            }
+        }
         return false;
     }
 
@@ -1397,7 +1519,11 @@ public class StashSorter extends Module {
      */
     private List<Box> destinationsFor(ItemStack stack) {
         if (stack.isEmpty()) return List.of();
+        if (destCache == null) return computeDestinations(stack);
+        return destCache.computeIfAbsent(DestKey.of(stack), k -> computeDestinations(stack));
+    }
 
+    private List<Box> computeDestinations(ItemStack stack) {
         if (mode.get() == Mode.Tiers) return tierBoxes.getOrDefault(tier(stack), List.of());
 
         // A shulker goes where what it's mostly full of goes: a shulker of totems belongs with the totems. Only when
@@ -1423,11 +1549,12 @@ public class StashSorter extends Module {
     private List<Box> bestSigned(ItemStack stack) {
         int best = 0;
         List<Box> result = new ArrayList<>();
+        Categories.Described item = Categories.describe(stack);
         for (Box box : stash.boxes) {
             if (!box.sortable() || box.dropOff) continue;
 
             int score = 0;
-            for (String label : box.labels) score = Math.max(score, Categories.signScore(label, stack));
+            for (String label : box.labels) score = Math.max(score, Categories.signScore(label, item));
 
             if (score > best) {
                 best = score;
@@ -1517,6 +1644,15 @@ public class StashSorter extends Module {
     }
 
     private int misplacedCount(Box box) {
+        if (misplacedCache == null) return countMisplaced(box);
+        Integer cached = misplacedCache.get(box);
+        if (cached != null) return cached;
+        int count = countMisplaced(box);
+        misplacedCache.put(box, count);
+        return count;
+    }
+
+    private int countMisplaced(Box box) {
         int count = 0;
         for (ItemStack stack : box.contents) if (!stack.isEmpty() && misplaced(stack, box)) count++;
         return count;
@@ -1549,6 +1685,29 @@ public class StashSorter extends Module {
         int added = 0;
 
         if (stash.boxes.removeIf(box -> mc.level.isLoaded(box.pos) && !isContainer(box.pos))) stash.markDirty();
+
+        // A chest next to a saved one may have made it a double (or a double been halved): bring the parts up to date
+        // and forget one that is now just the other half of an earlier box. Changed boxes get read again.
+        for (Box box : stash.boxes) {
+            if (!mc.level.isLoaded(box.pos)) continue;
+            List<BlockPos> now = makeBox(box.pos).parts;
+            if (now.equals(box.parts)) continue;
+
+            boolean resized = now.size() != box.parts.size();
+            box.parts.clear();
+            box.parts.addAll(now);
+            if (resized) box.contents = null;
+            stash.markDirty();
+        }
+        for (int i = stash.boxes.size() - 1; i > 0; i--) {
+            for (int j = 0; j < i; j++) {
+                if (stash.boxes.get(j).has(stash.boxes.get(i).pos)) {
+                    stash.boxes.remove(i);
+                    stash.markDirty();
+                    break;
+                }
+            }
+        }
 
         for (BlockPos p : BlockPos.betweenClosed(center.offset(-r, -h, -r), center.offset(r, h, r))) {
             if (!isContainer(p) || stash.boxAt(p) != null) continue;
@@ -1697,12 +1856,23 @@ public class StashSorter extends Module {
             triedKey = null;
             trackedMenu = null;
             trackedBox = null;
+            interactPos = null;
+            interactMenu = null;
             replies.clear();
+        }
+
+        @EventHandler
+        private void onInteract(InteractBlockEvent event) {
+            if (mc.player == null) return;
+            interactPos = event.result.getBlockPos();
+            interactMenu = mc.player.containerMenu;
+            interactClock = clock;
         }
 
         @EventHandler
         private void onTick(TickEvent.Post event) {
             if (mc.player == null || mc.level == null) return;
+            clock++;
 
             if (replyCooldown > 0) replyCooldown--;
             else if (!replies.isEmpty()) {
@@ -1719,7 +1889,15 @@ public class StashSorter extends Module {
             if (menu instanceof ChestMenu) {
                 if (menu != trackedMenu) {
                     trackedMenu = menu;
-                    trackedBox = mc.hitResult instanceof BlockHitResult hit && hit.getType() == HitResult.Type.BLOCK ? stash.boxAt(hit.getBlockPos()) : null;
+
+                    // Only a menu that opened after our last interact, from that block, and of that box's size
+                    trackedBox = null;
+                    if (interactPos != null && interactMenu != menu && clock - interactClock <= INTERACT_WINDOW) {
+                        Box box = stash.boxAt(interactPos);
+                        if (box != null && menu.slots.size() - 36 == box.parts.size() * 27) trackedBox = box;
+                    }
+                    interactPos = null;
+                    interactMenu = null;
                 }
 
                 if (trackedBox != null && changed(trackedBox, menu)) {
