@@ -4,6 +4,9 @@ import com.porter.qwerte.QwerteAddon;
 import com.porter.qwerte.compat.Players;
 import com.porter.qwerte.compat.RightClick;
 import com.porter.qwerte.utils.BaritoneHelper;
+import meteordevelopment.meteorclient.gui.GuiTheme;
+import meteordevelopment.meteorclient.gui.widgets.WWidget;
+import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -18,6 +21,7 @@ import meteordevelopment.orbit.EventHandler;
 import net.minecraft.world.Container;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.tags.FluidTags;
 import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
@@ -177,18 +181,26 @@ public class AutoTill extends Module implements Restocker.Owner {
         .build()
     );
 
-    private final Setting<BlockPos> seedStorage = sgPlanting.add(new BlockPosSetting.Builder()
+    // The storages are listed in the module's GUI, this only holds them for saving
+    private final Setting<List<String>> storageData = sgPlanting.add(new StringListSetting.Builder()
+        .name("seed-storages")
+        .description("The containers to take seeds from, managed with pick-storage and the list below the settings.")
+        .visible(() -> false)
+        .build()
+    );
+
+    // Older versions kept a single storage here, it's folded into the list when the settings load
+    private final Setting<BlockPos> legacyStorage = sgPlanting.add(new BlockPosSetting.Builder()
         .name("seed-storage")
-        .description("Coordinates of the container to take seeds from. Auto-walk is needed if it's out of reach.")
+        .description("Old single seed storage, moved into seed-storages.")
         .defaultValue(BlockPos.ZERO)
-        .onChanged(pos -> restockUnavailable = false)
-        .visible(this::usingStorage)
+        .visible(() -> false)
         .build()
     );
 
     private final Setting<Boolean> pickStorage = sgPlanting.add(new BoolSetting.Builder()
         .name("pick-storage")
-        .description("Turn on, then right-click a container to set it as the seed storage. Works while the module is off.")
+        .description("Turn on, then right-click a container to add it to the seed storages, or to remove it if it's already one. Turns itself off after one click. Works while the module is off.")
         .defaultValue(false)
         .visible(this::usingStorage)
         .build()
@@ -437,6 +449,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private static final int RESTOCK_RETRY_TICKS = 20 * 60;
 
     private final Restocker restocker = new Restocker(this, this::isSeed, "seeds");
+    private final StorageList storages = new StorageList(storageData, () -> restockUnavailable = false);
     private boolean restockUnavailable;
     private int restockRetryTicks;
 
@@ -567,11 +580,25 @@ public class AutoTill extends Module implements Restocker.Owner {
                 return;
             }
 
-            seedStorage.set(hit.getBlockPos().immutable());
+            storages.migrate(legacyStorage);
+            BlockPos pos = hit.getBlockPos().immutable();
+            boolean added = storages.toggle(pos);
             pickStorage.set(false);
-            restockUnavailable = false;
-            info("Seed storage set to %s.", seedStorage.get().toShortString());
+            info("%s storage at %s (%d storages).", added ? "Added" : "Removed", pos.toShortString(), storages.size());
         }
+    }
+
+    @Override
+    public Module fromTag(CompoundTag tag) {
+        Module module = super.fromTag(tag);
+        storages.migrate(legacyStorage);
+        return module;
+    }
+
+    @Override
+    public WWidget getWidget(GuiTheme theme) {
+        storages.migrate(legacyStorage);
+        return storages.widget(theme, "Seed storages", this::usingStorage);
     }
 
     @Override
@@ -598,6 +625,8 @@ public class AutoTill extends Module implements Restocker.Owner {
         refillRetryTicks = 0;
         restockUnavailable = false;
         restockRetryTicks = 0;
+        storages.migrate(legacyStorage);
+        storages.resetSession();
         noAimTicks = 0;
         approachedSpot = null;
         unreachable.clear();
@@ -634,11 +663,33 @@ public class AutoTill extends Module implements Restocker.Owner {
     }
 
     @EventHandler
+    private void onGameLeft(GameLeftEvent event) {
+        if (state == State.Restocking) restocker.cancel();
+
+        if (usedBaritone) {
+            BaritoneHelper.stop();
+            BaritoneHelper.unprotect();
+            usedBaritone = false;
+        }
+
+        // The world is gone, so is the hole we were digging and everything we knew about it. onActivate resets the rest.
+        waterSpot = null;
+        digSwapped = false;
+        digTicks = 0;
+        waterMisses = 0;
+        onActivate();
+    }
+
+    @EventHandler
     private void onTick(TickEvent.Pre event) {
         targets.clear();
         dryTargets.clear();
         plantTargets.clear();
         boneTargets.clear();
+        storages.tick();
+
+        // onActivate can run before the player exists
+        if (home == null) home = mc.player.blockPosition();
 
         if (autoWalk.get() && !BARITONE) {
             error("Baritone isn't installed, turning off auto-walk.");
@@ -1318,12 +1369,15 @@ public class AutoTill extends Module implements Restocker.Owner {
             case GoingToStorage -> {
                 if (stillTravelling()) return;
 
-                if (inReach(seedStorage.get())) {
-                    restocker.startManual(seedStorage.get());
+                BlockPos storage = storages.current();
+                if (storage != null && inReach(storage)) {
+                    restocker.startManual(storage);
                     state = State.Restocking;
                 }
                 else {
-                    blockRestock("Couldn't reach the seed storage at %s.", seedStorage.get().toShortString());
+                    storages.markBad(storage);
+                    if (tryNextStorage()) return;
+                    noStorageFinished(storage == null ? "Couldn't reach the seed storage." : "Couldn't reach the seed storage at " + storage.toShortString() + ".");
                     nextErrand();
                 }
             }
@@ -1354,11 +1408,24 @@ public class AutoTill extends Module implements Restocker.Owner {
             return true;
         }
 
-        BlockPos storage = seedStorage.get();
-        if (storage.equals(BlockPos.ZERO)) {
-            blockRestock("No seed storage set, use pick-storage or enter its coordinates.");
+        storages.beginAttempt();
+        if (storages.isEmpty()) {
+            blockRestock("No seed storage set, use pick-storage.");
             return false;
         }
+
+        if (tryNextStorage()) return true;
+        noStorageLeft();
+        return false;
+    }
+
+    /**
+     * Starts on the next storage that's worth trying, in reach first and then nearest.
+     * @return false when there's none left to try
+     */
+    private boolean tryNextStorage() {
+        BlockPos storage = storages.next(mc.player.getEyePosition(), this::inReach, walking());
+        if (storage == null) return false;
 
         if (inReach(storage)) {
             restocker.startManual(storage);
@@ -1366,15 +1433,35 @@ public class AutoTill extends Module implements Restocker.Owner {
             return true;
         }
 
-        if (!walking()) {
-            blockRestock("The seed storage at %s is out of reach, turn on auto-walk to walk there.", storage.toShortString());
-            return false;
-        }
-
-        // On a combined trip, we still head back to where the first errand started from
+        // On a combined trip, or after another storage, we still head back to where the first errand started from
         if (returnPos == null) returnPos = mc.player.blockPosition();
         goTo(storage, 2, State.GoingToStorage);
         return true;
+    }
+
+    /**
+     * No storage is left to try: turns restocking off if they're all empty, pauses it otherwise.
+     */
+    private void noStorageLeft() {
+        if (storages.allEmpty()) {
+            error("All %d seed storages are empty. Turning off seed-restock.", storages.size());
+            seedRestock.set(false);
+            storages.forgetEmpty();
+        }
+        else if (storages.skippedOutOfReach() && !autoWalk.get()) blockRestock("The seed storages are out of reach, turn on auto-walk to walk there.");
+        else if (storages.skippedOutOfReach()) blockRestock("Baritone isn't installed, so I can't walk to the seed storages.");
+        else blockRestock("Couldn't use any of the seed storages.");
+    }
+
+    /**
+     * A storage failed and there's none left to try. If an earlier one got us enough seeds, that still counts.
+     */
+    private void noStorageFinished(String reason) {
+        int seedCount = InvUtils.find(this::isSeed).count();
+
+        if (storages.allEmpty()) noStorageLeft();
+        else if (seedCount > restockAt.get()) info("Restocked seeds, you now have %d.", seedCount);
+        else blockRestock("%s", reason);
     }
 
     private void startRestockingHere() {
@@ -1390,18 +1477,39 @@ public class AutoTill extends Module implements Restocker.Owner {
             case Done -> {
                 int seedCount = InvUtils.find(this::isSeed).count();
 
-                if (restocker.sourceEmpty()) {
+                if (restockMode.get() == RestockMode.Storage) {
+                    if (restocker.sourceEmpty()) storages.markEmpty(storages.current());
+
+                    // Still low, so carry on with the next storage before heading back
+                    if (seedCount <= restockAt.get() && tryNextStorage()) return;
+
+                    if (storages.allEmpty()) {
+                        warning("Restocked to %d seeds, but that emptied all %d seed storages. Turning off seed-restock.", seedCount, storages.size());
+                        seedRestock.set(false);
+                        storages.forgetEmpty();
+                    }
+                    // Restocking goes first, so storages that have run dry would otherwise send us straight back
+                    else if (seedCount <= restockAt.get()) blockRestock("Restocked, but you only have %d seeds. Are the storages running low?", seedCount);
+                    else info("Restocked seeds, you now have %d.", seedCount);
+                }
+                else if (restocker.sourceEmpty()) {
                     warning("Restocked to %d seeds, but that emptied your %s. Turning off seed-restock.", seedCount, sourceName());
                     seedRestock.set(false);
                 }
-                // Restocking goes first, so a storage that's run dry would otherwise send us straight back
                 else if (seedCount <= restockAt.get()) blockRestock("Restocked, but you only have %d seeds. Is the storage running low?", seedCount);
                 else info("Restocked seeds, you now have %d.", seedCount);
 
                 nextErrand();
             }
             case Failed -> {
-                restockFailed(restocker.failure());
+                if (restockMode.get() == RestockMode.Storage) {
+                    if (restocker.sourceEmpty()) storages.markEmpty(storages.current());
+                    else storages.markBad(storages.current());
+
+                    if (tryNextStorage()) return;
+                    noStorageFinished(restocker.failure());
+                }
+                else restockFailed(restocker.failure());
                 nextErrand();
             }
         }
@@ -1607,14 +1715,30 @@ public class AutoTill extends Module implements Restocker.Owner {
 
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 
-        for (BlockPos pos : BlockPos.betweenClosed(home.getX() - radius, y - height, home.getZ() - radius, home.getX() + radius, y + height, home.getZ() + radius)) {
-            if (!isTillableBlock(pos) || inReach(pos) || unreachable.contains(pos) || failedTills.contains(pos)) continue;
+        // Column by column, skipping unloaded chunks and anything that can't beat the best so far
+        for (int x = home.getX() - radius; x <= home.getX() + radius; x++) {
+            double dx = x + 0.5 - eyes.x;
+            double dx2 = dx * dx;
+            if (dx2 >= bestDist) continue;
 
-            double dist = eyes.distanceToSqr(Vec3.atCenterOf(pos));
-            if (dist < bestDist) {
-                best = pos.immutable();
-                bestDist = dist;
+            for (int z = home.getZ() - radius; z <= home.getZ() + radius; z++) {
+                double dz = z + 0.5 - eyes.z;
+                double dxz = dx2 + dz * dz;
+                if (dxz >= bestDist || !mc.level.hasChunk(x >> 4, z >> 4)) continue;
+
+                for (int py = y - height; py <= y + height; py++) {
+                    double dy = py + 0.5 - eyes.y;
+                    double dist = dxz + dy * dy;
+                    if (dist >= bestDist) continue;
+
+                    pos.set(x, py, z);
+                    if (!isTillableBlock(pos) || inReach(pos) || unreachable.contains(pos) || failedTills.contains(pos)) continue;
+
+                    best = pos.immutable();
+                    bestDist = dist;
+                }
             }
         }
 

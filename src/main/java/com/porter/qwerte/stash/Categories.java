@@ -32,9 +32,71 @@ public final class Categories {
      * item's name, then a category the item belongs to, then a catch-all. 0 means the line doesn't describe it.
      */
     public static int signScore(String line, ItemStack stack) {
+        return signScore(line, describe(stack));
+    }
+
+    /**
+     * Same as {@link #signScore(String, ItemStack)}, for scoring one item against many lines: the item's normalised
+     * name and words are worked out once, and each line's split and normalisation is remembered.
+     */
+    public static int signScore(String line, Described item) {
         int best = 0;
-        for (String part : splitList(line)) best = Math.max(best, partScore(part, stack));
+        for (Part part : prepared(line)) best = Math.max(best, partScore(part, item));
         return best;
+    }
+
+    public static Described describe(ItemStack stack) {
+        return new Described(stack);
+    }
+
+    /**
+     * An item with the text derived from it, computed once and only when needed.
+     */
+    public static final class Described {
+        private final ItemStack stack;
+        private String name, id;
+        private Set<String> words;
+
+        private Described(ItemStack stack) {
+            this.stack = stack;
+        }
+
+        private String name() {
+            if (name == null) name = normalize(stack.getHoverName().getString());
+            return name;
+        }
+
+        private String id() {
+            if (id == null) id = normalize(Categories.id(stack));
+            return id;
+        }
+
+        private Set<String> words() {
+            if (words == null) words = Categories.words(name() + " " + id() + " " + extraWords(stack));
+            return words;
+        }
+    }
+
+    /**
+     * A sign line part, normalised once: the label to match and its singular form.
+     */
+    private record Part(String label, String singularLabel) {
+    }
+
+    private static final Map<String, List<Part>> PREPARED = new HashMap<>();
+
+    private static List<Part> prepared(String line) {
+        List<Part> parts = PREPARED.get(line);
+        if (parts == null) {
+            if (PREPARED.size() > 2048) PREPARED.clear();
+            parts = new ArrayList<>();
+            for (String part : splitList(line)) {
+                String label = stripFiller(normalize(part));
+                parts.add(new Part(label, label.isEmpty() ? label : singularPhrase(label)));
+            }
+            PREPARED.put(line, parts);
+        }
+        return parts;
     }
 
     /**
@@ -81,20 +143,23 @@ public final class Categories {
 
     private static int partScore(String part, ItemStack stack) {
         String label = stripFiller(normalize(part));
+        return partScore(new Part(label, label.isEmpty() ? label : singularPhrase(label)), new Described(stack));
+    }
+
+    private static int partScore(Part part, Described item) {
+        String label = part.label();
         if (label.isEmpty()) return 0;
 
-        String name = normalize(stack.getHoverName().getString());
-        String id = normalize(id(stack));
-        if (label.equals(name) || label.equals(id)) return 100;
+        ItemStack stack = item.stack;
+        if (label.equals(item.name()) || label.equals(item.id())) return 100;
 
         // Nicknames: "rockets", "crystals", "obby", "egaps"...
-        Set<String> nicknamed = SHORTHANDS.get(singularPhrase(label));
+        Set<String> nicknamed = SHORTHANDS.get(part.singularLabel());
         if (nicknamed != null && nicknamed.contains(id(stack))) return 60;
 
-        Set<String> words = words(name + " " + id + " " + extraWords(stack));
-        if (allIn(label, words)) return 60;
+        if (allIn(label, item.words())) return 60;
 
-        Predicate<ItemStack> category = CATEGORIES.get(singularPhrase(label));
+        Predicate<ItemStack> category = CATEGORIES.get(part.singularLabel());
         if (category != null) return category.test(stack) ? 40 : 0;
 
         if (CATCH_ALL.contains(label)) return CATCH_ALL_SCORE;
