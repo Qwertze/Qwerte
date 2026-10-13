@@ -141,6 +141,23 @@ Write signs the way you'd talk. Each line is read on its own, a sign's lines are
 | By stack size | `x64` / `stackables`, `x16`, `singles` |
 | Catch-all | `misc`, `other`, `overflow`, `unsorted`, `*` |
 
+#### Repacking shulkers
+In Signs mode, with `repack` on, it sorts what's inside shulkers too:
+
+- **Mixed shulkers are cleaned out.** A shulker is kept for whatever it's mostly full of. Anything else in it that a
+  sign has a home for is taken out, so a shulker of totems with a few rockets and some obsidian becomes a shulker of
+  totems, and the rockets and obsidian go to their own chests.
+- **Loose items are packed into bulk shulkers.** Before putting loose items away, it tops up a shulker that already
+  holds only that item and has room, one it's carrying or one from the stash. With `new-bulk-at` stacks or more of one
+  item, it starts a new bulk shulker from an empty one.
+- Then the shulkers go where their contents belong, like any other shulker.
+
+To do this it puts the shulker down beside you, opens it, moves the items, then breaks it and picks it back up. It
+needs a free spot beside you on solid ground with air above, and a pickaxe in the hotbar makes breaking quicker.
+
+Left as they are: named shulkers, and any shulker when a sign asks for shulkers whole, like `Kits` or `Full
+Shulkers`. If you keep kits, give them a `Kits` chest so they aren't taken apart.
+
 #### Excluded and drop-off containers
 - Set `pick` to **Exclude** and right-click containers it should never sort into or out of. Right-click again to undo.
 - Set `pick` to **Drop-off** and right-click containers to empty into the stash, for example a chest where friends
@@ -345,6 +362,8 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | General | `delay` | 3 | Ticks between inventory clicks. Raise it if the server rejects clicks. |
 | General | `walk` | off | Walk to containers out of reach with Baritone. |
 | General | `rotate` | on | Face containers when opening them. |
+| Shulkers | `repack` | on | Signs mode: clean mixed shulkers and pack loose items into bulk shulkers. |
+| Shulkers | `new-bulk-at` | 9 | Start a new bulk shulker from an empty one at this many stacks of one item. 0 only tops up existing ones. |
 | Bot | `stay-on` | off | Keep running after sorting, as a sorting bot. |
 | Bot | `recheck` | 30 | Seconds between drop-off checks. |
 | Slots | `carry-slots` | blank | Slots to carry items in. Blank uses every empty slot. |

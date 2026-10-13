@@ -25,6 +25,7 @@ import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.ChatUtils;
+import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -32,10 +33,16 @@ import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.component.DataComponents;
+import net.minecraft.tags.ItemTags;
 import net.minecraft.world.InteractionHand;
+import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ChestMenu;
+import net.minecraft.world.inventory.ShulkerBoxMenu;
+import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
+import net.minecraft.world.phys.AABB;
 import net.minecraft.world.level.block.ChestBlock;
 import net.minecraft.world.level.block.StandingSignBlock;
 import net.minecraft.world.level.block.WallSignBlock;
@@ -72,6 +79,7 @@ import java.util.regex.Pattern;
 public class StashSorter extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgBot = settings.createGroup("Bot");
+    private final SettingGroup sgShulkers = settings.createGroup("Shulkers");
     private final SettingGroup sgSlots = settings.createGroup("Slots");
     private final SettingGroup sgSearch = settings.createGroup("Search");
     private final SettingGroup sgRender = settings.createGroup("Render");
@@ -209,6 +217,25 @@ public class StashSorter extends Module {
         .build()
     );
 
+    // Shulkers
+
+    private final Setting<Boolean> repack = sgShulkers.add(new BoolSetting.Builder()
+        .name("repack")
+        .description("Signs mode: takes items that belong elsewhere out of mixed shulkers, and packs loose items into shulkers that already hold only that item. Places the shulker beside you to do it, then breaks it and picks it back up. Named shulkers, and shulkers when a sign asks for them whole (like \"kits\"), are left as they are.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> newBulkAt = sgShulkers.add(new IntSetting.Builder()
+        .name("new-bulk-at")
+        .description("Starts a new bulk shulker from an empty one once carrying this many stacks of one item. 0 only tops up shulkers that already exist.")
+        .defaultValue(9)
+        .range(0, 27)
+        .sliderRange(0, 27)
+        .visible(repack::get)
+        .build()
+    );
+
     // Slots
 
     private final Setting<String> carrySlots = sgSlots.add(new StringSetting.Builder()
@@ -309,9 +336,15 @@ public class StashSorter extends Module {
         Pattern.compile("^(\\w{3,16}) -> (?:me|you): (.+)$")
     };
 
-    private enum Job { Survey, Take, Deposit, Dump }
+    private enum Job { Survey, Take, Deposit, Dump, Fetch, Clean, Fill }
 
     private enum Step { Walking, Opening, Working }
+
+    // Repacking a shulker in the world: put it down, open it, move items, break it, pick it back up
+    private enum Handle { Place, Open, Work, Break, Collect }
+
+    private static final int HANDLE_TIMEOUT = 20 * 10;
+    private static final int COLLECT_TIMEOUT = 20 * 15;
 
     private Stash stash;
     private String triedKey;
@@ -333,6 +366,21 @@ public class StashSorter extends Module {
     // Containers where the last job got nothing done, skipped until something moves somewhere else
     private final Set<Box> stalled = new HashSet<>();
     private int actions;
+
+    // Repacking
+    private int wantSlot = -1;
+    private int handledSlot;
+    private Item fillItem;
+    private Item mainItem;
+    private Handle handle;
+    private int handleTicks;
+    private BlockPos placed;
+    private int swapBackFrom = -1, swapBackTo = -1;
+    private boolean pickaxeSwapped;
+    private int shulkersBefore;
+    private final Set<Integer> shulkerSlotsBefore = new HashSet<>();
+    private boolean repackFailed;
+    private final Set<Item> packTried = new HashSet<>();
 
     // Bot mode
     private boolean idle;
@@ -367,6 +415,9 @@ public class StashSorter extends Module {
         idle = false;
         stalled.clear();
         tierBoxes.clear();
+        handle = null;
+        repackFailed = false;
+        packTried.clear();
 
         if (!pickCarrySlots()) {
             toggle();
@@ -413,6 +464,15 @@ public class StashSorter extends Module {
             BaritoneHelper.unprotect();
             usedBaritone = false;
         }
+
+        if (pickaxeSwapped) {
+            InvUtils.swapBack();
+            pickaxeSwapped = false;
+        }
+        if (handle != null && placed != null && mc.level != null && !mc.level.getBlockState(placed).isAir()) {
+            warning("Stopped while repacking, there's a shulker left at %s.", placed.toShortString());
+        }
+        handle = null;
 
         if (stash != null && stash.isDirty()) stash.save();
 
@@ -490,6 +550,11 @@ public class StashSorter extends Module {
             if (idle && !wakeUp()) return;
             if (!nextJob()) return;
         }
+
+        if (handle != null) {
+            tickHandling();
+            return;
+        }
         stepTicks++;
 
         switch (step) {
@@ -523,6 +588,7 @@ public class StashSorter extends Module {
         if (version != seenVersion) {
             seenVersion = version;
             stalled.clear();
+            packTried.clear();
             idle = false;
             return true;
         }
@@ -540,6 +606,8 @@ public class StashSorter extends Module {
         if (unread != null) return start(Job.Survey, unread);
 
         plan();
+
+        if (repackOn() && nextRepackJob()) return true;
 
         List<Integer> carried = carriedSlots();
         if (!carried.isEmpty()) {
@@ -562,11 +630,447 @@ public class StashSorter extends Module {
             return false;
         }
 
+        // Mixed shulkers sitting in the stash: fetch one to clean out
+        if (repackOn() && freeCarryCount() >= 2) {
+            Box best = null;
+            int bestSlot = -1;
+            for (Box box : stash.boxes) {
+                if (!box.sortable() || stalled.contains(box)) continue;
+                for (int i = 0; i < box.contents.length; i++) {
+                    if (!strays(box.contents[i]).isEmpty() && (best == null || closer(box, best))) {
+                        best = box;
+                        bestSlot = i;
+                        break;
+                    }
+                }
+            }
+            if (best != null) return fetch(best, bestSlot);
+        }
+
         Box source = nearest(stash.boxes.stream().filter(b -> b.sortable() && !stalled.contains(b) && takeableSlot(b) != -1).toList());
         if (source != null) return start(Job.Take, source);
 
         finishSorting();
         return false;
+    }
+
+    // Repacking shulkers
+
+    private boolean repackOn() {
+        return repack.get() && mode.get() == Mode.Signs && !repackFailed;
+    }
+
+    /**
+     * Cleans a carried mixed shulker, or packs carried items into a bulk shulker, fetching one if needed.
+     * @return true when a job was started
+     */
+    private boolean nextRepackJob() {
+        // A carried shulker with items in it that belong elsewhere: clean it out right here
+        if (freeCarrySlot() != -1) {
+            for (int slot : carriedSlots()) {
+                ItemStack stack = mc.player.getInventory().getItem(slot);
+                if (strays(stack).isEmpty()) continue;
+                mainItem = Categories.dominantContent(stack).getItem();
+                return startHandling(Job.Clean, slot, null);
+            }
+        }
+
+        // Loose items with a bulk shulker to go in
+        for (int slot : carriedSlots()) {
+            ItemStack loose = mc.player.getInventory().getItem(slot);
+            if (Utils.isShulker(loose.getItem()) || packTried.contains(loose.getItem())) continue;
+            Item item = loose.getItem();
+            int stacks = carriedStacksOf(item);
+
+            for (int s : carriedSlots()) {
+                ItemStack shulker = mc.player.getInventory().getItem(s);
+                if (bulkWithRoom(shulker, item) || (newBulkAt.get() > 0 && stacks >= newBulkAt.get() && emptyShulker(shulker))) {
+                    return startHandling(Job.Fill, s, item);
+                }
+            }
+
+            if (freeCarrySlot() != -1) {
+                Box from = null;
+                int fromSlot = -1;
+                for (Box box : stash.boxes) {
+                    if (!box.sortable() || box.dropOff || stalled.contains(box)) continue;
+                    for (int i = 0; i < box.contents.length; i++) {
+                        ItemStack s = box.contents[i];
+                        boolean usable = bulkWithRoom(s, item) || (newBulkAt.get() > 0 && stacks >= newBulkAt.get() && emptyShulker(s));
+                        if (usable && (from == null || closer(box, from))) {
+                            from = box;
+                            fromSlot = i;
+                            break;
+                        }
+                    }
+                }
+                if (from != null) return fetch(from, fromSlot);
+            }
+
+            // Nowhere to pack it: it's put away loose
+            packTried.add(item);
+        }
+
+        return false;
+    }
+
+    private boolean fetch(Box box, int slot) {
+        wantSlot = slot;
+        return start(Job.Fetch, box);
+    }
+
+    /**
+     * Slots inside a shulker holding items that belong in another signed container than what the shulker is mostly
+     * full of. Empty when the shulker isn't one to clean: not a shulker, named, all one item, or wanted whole by a
+     * sign like "kits".
+     */
+    private List<Integer> strays(ItemStack shulker) {
+        if (shulker == null || shulker.isEmpty() || !Utils.isShulker(shulker.getItem())) return List.of();
+        if (shulker.has(DataComponents.CUSTOM_NAME)) return List.of();
+
+        ItemStack main = Categories.dominantContent(shulker);
+        if (main == null) return List.of();
+
+        // A sign asks for shulkers as they are, like "kits" or "full shulkers"
+        if (!bestSigned(shulker).isEmpty()) return List.of();
+
+        List<Integer> out = new ArrayList<>();
+        ItemStack[] inside = inside(shulker);
+        for (int i = 0; i < inside.length; i++) {
+            ItemStack s = inside[i];
+            if (s == null || s.isEmpty() || s.is(main.getItem())) continue;
+            if (!bestSigned(s).isEmpty()) out.add(i);
+        }
+        return out;
+    }
+
+    /**
+     * A shulker holding only {@code item}, with room for more.
+     */
+    private static boolean bulkWithRoom(ItemStack shulker, Item item) {
+        if (shulker == null || shulker.isEmpty() || !Utils.isShulker(shulker.getItem()) || shulker.has(DataComponents.CUSTOM_NAME)) return false;
+
+        boolean any = false, room = false;
+        for (ItemStack s : inside(shulker)) {
+            if (s == null || s.isEmpty()) {
+                room = true;
+                continue;
+            }
+            if (!s.is(item)) return false;
+            any = true;
+            if (s.getCount() < s.getMaxStackSize()) room = true;
+        }
+        return any && room;
+    }
+
+    private static boolean emptyShulker(ItemStack shulker) {
+        if (shulker == null || shulker.isEmpty() || !Utils.isShulker(shulker.getItem()) || shulker.has(DataComponents.CUSTOM_NAME)) return false;
+        for (ItemStack s : inside(shulker)) if (s != null && !s.isEmpty()) return false;
+        return true;
+    }
+
+    private static ItemStack[] inside(ItemStack shulker) {
+        ItemStack[] contents = new ItemStack[27];
+        Utils.getItemsInContainerItem(shulker, contents);
+        return contents;
+    }
+
+    private int carriedStacksOf(Item item) {
+        int count = 0;
+        for (int slot : carriedSlots()) if (mc.player.getInventory().getItem(slot).is(item)) count++;
+        return count;
+    }
+
+    private int freeCarryCount() {
+        int count = 0;
+        for (int slot : carry) if (mc.player.getInventory().getItem(slot).isEmpty()) count++;
+        return count;
+    }
+
+    private boolean closer(Box a, Box b) {
+        Vec3 eyes = mc.player.getEyePosition();
+        return eyes.distanceToSqr(Vec3.atCenterOf(nearestPart(a))) < eyes.distanceToSqr(Vec3.atCenterOf(nearestPart(b)));
+    }
+
+    private boolean startHandling(Job next, int slot, Item fill) {
+        job = next;
+        target = null;
+        handledSlot = slot;
+        fillItem = fill;
+        handle = Handle.Place;
+        handleTicks = 0;
+        placed = null;
+        actions = 0;
+        return true;
+    }
+
+    /**
+     * One step of repacking a shulker beside us: place, open, move items, break, pick back up.
+     */
+    private void tickHandling() {
+        handleTicks++;
+
+        switch (handle) {
+            case Place -> handlePlace();
+            case Open -> handleOpen();
+            case Work -> handleWork();
+            case Break -> handleBreak();
+            case Collect -> handleCollect();
+        }
+    }
+
+    private void handlePlace() {
+        ItemStack shulker = mc.player.getInventory().getItem(handledSlot);
+        if (!Utils.isShulker(shulker.getItem())) {
+            endHandling();
+            return;
+        }
+
+        BlockPos spot = placeSpot();
+        if (spot == null) {
+            warning("No room to put a shulker down beside me, so I'm not repacking shulkers this run.");
+            repackFailed = true;
+            endHandling();
+            return;
+        }
+
+        // It has to be in the hotbar to place it
+        int hotbar = handledSlot;
+        if (hotbar >= 9) {
+            hotbar = -1;
+            Set<Integer> keep = parseSlots(keepSlots.get());
+            for (int i = 0; i < 9 && hotbar == -1; i++) if (!keep.contains(i) && mc.player.getInventory().getItem(i).isEmpty()) hotbar = i;
+            if (hotbar == -1) {
+                for (int i = 0; i < 9 && hotbar == -1; i++) if (!keep.contains(i)) hotbar = i;
+                swapBackFrom = handledSlot;
+                swapBackTo = hotbar;
+            }
+            if (hotbar == -1) {
+                warning("No hotbar slot I'm allowed to use to place shulkers, so I'm not repacking shulkers this run.");
+                repackFailed = true;
+                endHandling();
+                return;
+            }
+            InvUtils.move().from(handledSlot).to(hotbar);
+            handledSlot = hotbar;
+            wait = delay.get();
+            return;
+        }
+
+        shulkersBefore = countShulkers();
+        if (!BlockUtils.place(spot, new FindItemResult(hotbar, shulker.getCount()), rotate.get(), 50, true, true, true)) {
+            if (handleTicks > HANDLE_TIMEOUT) failHandling("Couldn't put the shulker down.");
+            return;
+        }
+
+        placed = spot;
+        handle = Handle.Open;
+        handleTicks = 0;
+        wait = delay.get();
+    }
+
+    private void handleOpen() {
+        // Put back whatever we swapped out of the hotbar to place it
+        if (swapBackFrom != -1 && mc.player.getInventory().getItem(swapBackTo).isEmpty()) {
+            InvUtils.move().from(swapBackFrom).to(swapBackTo);
+            swapBackFrom = swapBackTo = -1;
+            wait = delay.get();
+            return;
+        }
+
+        if (mc.player.containerMenu instanceof ShulkerBoxMenu) {
+            shulkerSlotsBefore.clear();
+            for (int i = 0; i < 36; i++) if (Utils.isShulker(mc.player.getInventory().getItem(i).getItem())) shulkerSlotsBefore.add(i);
+            handle = Handle.Work;
+            handleTicks = 0;
+            wait = delay.get();
+            return;
+        }
+
+        if (handleTicks > HANDLE_TIMEOUT) {
+            handle = Handle.Break;
+            handleTicks = 0;
+            return;
+        }
+
+        if (handleTicks == 1 || handleTicks % 20 == 0) {
+            if (mc.level.getBlockState(placed).isAir()) {
+                // Never got placed after all, it's still in the inventory
+                endHandling();
+                return;
+            }
+            BlockHitResult hit = new BlockHitResult(Vec3.atCenterOf(placed), Direction.UP, placed, false);
+            BlockUtils.interact(hit, InteractionHand.MAIN_HAND, true);
+        }
+    }
+
+    private void handleWork() {
+        if (!(mc.player.containerMenu instanceof ShulkerBoxMenu menu)) {
+            handle = Handle.Break;
+            handleTicks = 0;
+            return;
+        }
+
+        boolean busy = job == Job.Clean ? takeStray(menu) : packOne(menu);
+        if (busy) {
+            actions++;
+            wait = delay.get();
+            return;
+        }
+
+        if (job == Job.Fill && actions == 0) packTried.add(fillItem);
+        // Nothing to take out after all: stop trying, or we'd keep reopening the same shulker
+        if (job == Job.Clean && actions == 0) repackFailed = true;
+        mc.player.closeContainer();
+        handle = Handle.Break;
+        handleTicks = 0;
+        wait = delay.get();
+    }
+
+    /**
+     * Takes one stack that belongs elsewhere out of the open shulker, into a free carry slot.
+     */
+    private boolean takeStray(AbstractContainerMenu menu) {
+        int into = freeCarrySlot();
+        if (into == -1) return false;
+
+        for (int i = 0; i < 27; i++) {
+            ItemStack s = menu.getSlot(i).getItem();
+            if (s.isEmpty() || s.is(mainItem) || bestSigned(s).isEmpty()) continue;
+            InvUtils.move().fromId(i).toId(inventoryToMenu(into, 27));
+            moved++;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Puts one carried stack of the item being packed into the open shulker.
+     */
+    private boolean packOne(AbstractContainerMenu menu) {
+        for (int slot : carriedSlots()) {
+            ItemStack stack = mc.player.getInventory().getItem(slot);
+            if (!stack.is(fillItem)) continue;
+
+            for (int i = 0; i < 27; i++) {
+                ItemStack here = menu.getSlot(i).getItem();
+                if (here.isEmpty() || (ItemStack.isSameItemSameComponents(here, stack) && here.getCount() < here.getMaxStackSize())) {
+                    InvUtils.shiftClick().slotId(inventoryToMenu(slot, 27));
+                    moved++;
+                    return true;
+                }
+            }
+            return false;
+        }
+        return false;
+    }
+
+    private void handleBreak() {
+        if (mc.player.containerMenu != mc.player.inventoryMenu) {
+            mc.player.closeContainer();
+            return;
+        }
+
+        if (mc.level.getBlockState(placed).isAir()) {
+            if (pickaxeSwapped) {
+                InvUtils.swapBack();
+                pickaxeSwapped = false;
+            }
+            handle = Handle.Collect;
+            handleTicks = 0;
+            return;
+        }
+
+        if (handleTicks > HANDLE_TIMEOUT * 2) {
+            failHandling("Couldn't break the shulker at " + placed.toShortString() + ", it's still there.");
+            return;
+        }
+
+        if (!pickaxeSwapped) {
+            FindItemResult pickaxe = InvUtils.findInHotbar(s -> s.is(ItemTags.PICKAXES));
+            if (pickaxe.found()) {
+                InvUtils.swap(pickaxe.slot(), true);
+                pickaxeSwapped = true;
+            }
+        }
+        BlockUtils.breakBlock(placed, true);
+    }
+
+    private void handleCollect() {
+        if (countShulkers() >= shulkersBefore) {
+            // Picked up: make sure it's in a carry slot, so it gets put away
+            for (int i = 0; i < 36; i++) {
+                if (shulkerSlotsBefore.contains(i) || !Utils.isShulker(mc.player.getInventory().getItem(i).getItem())) continue;
+                if (!carry.contains(i)) {
+                    int free = freeCarrySlot();
+                    if (free != -1) InvUtils.move().from(i).to(free);
+                    else warning("The repacked shulker ended up outside the carry slots, in slot %d.", i + 1);
+                }
+                break;
+            }
+            endHandling();
+            return;
+        }
+
+        if (handleTicks > COLLECT_TIMEOUT) {
+            failHandling("Couldn't pick the shulker back up, it's on the ground near " + placed.toShortString() + ".");
+            return;
+        }
+
+        // Dropped out of reach: walk over it
+        if (handleTicks == 40 && walk.get() && BARITONE) {
+            ItemEntity drop = null;
+            for (ItemEntity e : mc.level.getEntitiesOfClass(ItemEntity.class, new AABB(placed).inflate(4))) {
+                if (Utils.isShulker(e.getItem().getItem())) {
+                    drop = e;
+                    break;
+                }
+            }
+            if (drop != null) {
+                BaritoneHelper.protect(List.of());
+                usedBaritone = true;
+                BaritoneHelper.moveNear(drop.blockPosition(), 0);
+            }
+        }
+    }
+
+    private void endHandling() {
+        handle = null;
+        placed = null;
+        if (stash.isDirty()) stash.save();
+        job = null;
+        wait = delay.get();
+    }
+
+    private void failHandling(String why) {
+        warning("%s Stopping.", why);
+        handle = null;
+        job = null;
+        toggle();
+    }
+
+    private int countShulkers() {
+        int count = 0;
+        for (int i = 0; i < 36; i++) if (Utils.isShulker(mc.player.getInventory().getItem(i).getItem())) count++;
+        return count;
+    }
+
+    /**
+     * An empty spot beside us on solid ground, with air above for the lid, to put a shulker down.
+     */
+    private BlockPos placeSpot() {
+        BlockPos feet = mc.player.blockPosition();
+        for (int dy = 0; dy >= -1; dy--) {
+            for (Direction dir : HORIZONTALS) {
+                BlockPos p = feet.relative(dir).above(dy);
+                if (!BlockUtils.canPlace(p, true)) continue;
+                if (!mc.level.getBlockState(p.above()).isAir()) continue;
+                if (!mc.level.getBlockState(p.below()).isFaceSturdy(mc.level, p.below(), Direction.UP)) continue;
+                if (stash.boxAt(p) != null) continue;
+                return p;
+            }
+        }
+        return null;
     }
 
     private void finishSorting() {
@@ -683,8 +1187,9 @@ public class StashSorter extends Module {
         read(target);
 
         boolean busy = switch (job) {
-            case Survey -> false;
+            case Survey, Clean, Fill -> false;
             case Take -> takeOne();
+            case Fetch -> fetchOne();
             case Deposit -> depositOne();
             case Dump -> dumpOne();
         };
@@ -711,6 +1216,21 @@ public class StashSorter extends Module {
 
         // Straight into a carry slot, so it can never land in or top up one of the player's own stacks
         InvUtils.move().fromId(slot).toId(inventoryToMenu(into, target.contents.length));
+        return true;
+    }
+
+    /**
+     * Takes the one shulker this trip came for into a free carry slot, to repack it.
+     * @return false once it's taken, or if it's gone
+     */
+    private boolean fetchOne() {
+        if (wantSlot < 0 || actions > 0) return false;
+
+        int into = freeCarrySlot();
+        if (into == -1 || wantSlot >= target.contents.length || !Utils.isShulker(target.contents[wantSlot].getItem())) return false;
+
+        InvUtils.move().fromId(wantSlot).toId(inventoryToMenu(into, target.contents.length));
+        wantSlot = -1;
         return true;
     }
 
