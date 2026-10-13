@@ -1,6 +1,8 @@
 # Qwerte
 A Meteor Addon For 2b2t Dedicated to Regrowing &amp; Creating Farmland
 
+[![Downloads](https://img.shields.io/github/downloads/Qwertze/Qwerte/total?label=downloads&color=blue)](https://github.com/Qwertze/Qwerte/releases)
+
 Qwerte adds four modules to [Meteor Client](https://meteorclient.com):
 
 - **Auto Till** turns nearby dirt and grass into farmland, digs and fills water holes so the farmland stays hydrated,
