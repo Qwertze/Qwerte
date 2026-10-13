@@ -168,7 +168,14 @@ public final class Categories {
 
         ItemStack[] contents = new ItemStack[27];
         Utils.getItemsInContainerItem(shulker, contents);
+        return mostCommon(contents);
+    }
 
+    /**
+     * The item taking up the most slots, then the most items, or null if there's nothing. Empty and null slots are
+     * skipped.
+     */
+    public static ItemStack mostCommon(ItemStack[] contents) {
         Map<net.minecraft.world.item.Item, int[]> tally = new HashMap<>();
         Map<net.minecraft.world.item.Item, ItemStack> sample = new HashMap<>();
         for (ItemStack stack : contents) {

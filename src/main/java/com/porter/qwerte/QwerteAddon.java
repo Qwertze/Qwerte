@@ -3,6 +3,7 @@ package com.porter.qwerte;
 import com.mojang.logging.LogUtils;
 import com.porter.qwerte.modules.AutoDirt;
 import com.porter.qwerte.modules.AutoTill;
+import com.porter.qwerte.modules.StashOverlay;
 import com.porter.qwerte.modules.StashSorter;
 import meteordevelopment.meteorclient.addons.GithubRepo;
 import meteordevelopment.meteorclient.addons.MeteorAddon;
@@ -23,6 +24,7 @@ public class QwerteAddon extends MeteorAddon {
         Modules.get().add(new AutoTill());
         Modules.get().add(new AutoDirt());
         Modules.get().add(new StashSorter());
+        Modules.get().add(new StashOverlay());
     }
 
     @Override

@@ -1067,6 +1067,13 @@ public class StashSorter extends Module {
         return stash;
     }
 
+    /**
+     * The saved stash named in the settings, for other modules like stash-overlay. Null if there isn't one here.
+     */
+    public Stash currentStash() {
+        return ensureStash();
+    }
+
     private class Tracker {
         @EventHandler
         private void onGameLeft(GameLeftEvent event) {

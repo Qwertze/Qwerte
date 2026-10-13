@@ -1,7 +1,7 @@
 # Qwerte
 A Meteor Addon For 2b2t Dedicated to Regrowing &amp; Creating Farmland
 
-Qwerte adds three modules to [Meteor Client](https://meteorclient.com):
+Qwerte adds four modules to [Meteor Client](https://meteorclient.com):
 
 - **Auto Till** turns nearby dirt and grass into farmland, digs and fills water holes so the farmland stays hydrated,
   plants and bone meals crops, and restocks its own seeds. With [Baritone](https://github.com/dekrom/baritone)
@@ -10,6 +10,8 @@ Qwerte adds three modules to [Meteor Client](https://meteorclient.com):
   never places dirt on top of dirt, and restocks its own dirt.
 - **Stash Sorter** *(dev builds only, experimental)* sorts the chests and barrels around you, either into tiers or by
   the signs on them.
+- **Stash Overlay** *(dev builds only, experimental)* shows what each container in a saved stash mostly holds, as an
+  item icon on the container.
 
 | | |
 |---|---|
@@ -21,7 +23,7 @@ Qwerte adds three modules to [Meteor Client](https://meteorclient.com):
 
 ## Features
 
-Auto Till and Auto Dirt are in Meteor's **Farming** category, Stash Sorter is in **Storage**. Every feature can be
+Auto Till and Auto Dirt are in Meteor's **Farming** category, Stash Sorter and Stash Overlay are in **Storage**. Every feature can be
 switched on and off on its own.
 
 ### Auto Till
@@ -164,6 +166,14 @@ Write signs the way you'd talk. Each line is read on its own, a sign's lines are
   `Diamond Can be Found At 120, 64, -300 @ stash`. Works with the module off. Replies are spaced out to avoid spam
   kicks.
 
+### Stash Overlay (experimental)
+- Draws the item each container holds most of as an icon on the container, so you can see what's where at a glance.
+  It uses the stash saved by stash-sorter (the one named in its `stash-name`), so scan a stash with stash-sorter first.
+- Icons grow as you walk up to a container and shrink as you walk away, between `max-grow` and `min-shrink`. They
+  disappear once a container is beyond your render distance.
+- A container mostly full of shulkers shows what the shulkers mostly hold, with a small shulker in the corner.
+- Icons update as the stash does: whenever stash-sorter sorts or you open a container yourself.
+
 ## Installation
 
 1. Install [Fabric Loader](https://fabricmc.net/use/installer/) for Minecraft **1.21.11** or **1.21.4**.
@@ -249,6 +259,7 @@ around. The purple boxes are the blocks it's about to till.
    a `mode` and turn it on. The first run reads every container, later runs go straight to sorting.
 5. Turn on `stay-on` to keep it running as a sorting bot.
 6. Search the stash anytime from the module's settings.
+7. Turn on **stash-overlay** to see what each container holds.
 
 ## Settings reference
 
@@ -345,6 +356,18 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | Render | `shape-mode` | Both | How the highlight is drawn. |
 | Render | `work-color` / `excluded-color` / `drop-off-color` | orange / red / blue | Highlight colors. |
 
+### stash-overlay
+
+| Setting | Default | Description |
+|---|---|---|
+| `size` | 3 | How big the icons are, at 6 blocks away. |
+| `max-grow` | 2.5 | How much bigger icons can grow as you get close. |
+| `min-shrink` | 0.35 | How small icons can shrink far away. |
+| `height` | 0.5 | Where on the container the icon sits: 0 bottom, 0.5 middle, 1 top. |
+| `shulker-contents` | on | For containers of shulkers, show what the shulkers hold. |
+| `show-count` | off | Show how many of the item the container holds. |
+| `hide-excluded` | off | No icons on containers excluded from sorting. |
+
 ## Building from source
 
 You need **JDK 21** or newer. Everything else, including Minecraft, Meteor and the Baritone API, is downloaded by Gradle.
@@ -371,6 +394,7 @@ src/main/java/com/porter/qwerte/
 │   ├── AutoTill.java         The auto-till module: tilling, watering, planting, automation
 │   ├── AutoDirt.java         The auto-dirt module: covering ground with dirt
 │   ├── StashSorter.java      The stash-sorter module: sorting, bot mode, picking, search
+│   ├── StashOverlay.java     The stash-overlay module: an icon of each container's main item
 │   └── Restocker.java        Storage and ender chest restocking, shared by auto-till and auto-dirt
 ├── stash/
 │   ├── Stash.java            A saved stash: its containers and contents, saving, loading and search
@@ -382,6 +406,7 @@ src/main/java/com/porter/qwerte/
 src/<minecraft>/java/com/porter/qwerte/compat/
 ├── Players.java              The selected hotbar slot
 ├── RightClick.java           Right clicks, for picking storages and stations
+├── ItemIcons.java            Drawing item icons on screen, for stash-overlay
 └── BaritoneFluids.java       Keeping Baritone from placing blocks in water, where the version allows it
 
 versions/<minecraft>.properties   Minecraft, Meteor and Baritone versions for each supported Minecraft version
@@ -392,7 +417,7 @@ folder for the version being built is compiled. The addon version, Fabric Loader
 `gradle/libs.versions.toml`.
 
 To add another Minecraft version, add a `versions/<minecraft>.properties` and a `src/<minecraft>/java` folder with the
-three compat classes, then build with `-Pmc=<minecraft>`.
+four compat classes, then build with `-Pmc=<minecraft>`.
 
 ## License
 
