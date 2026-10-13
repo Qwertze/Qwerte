@@ -34,6 +34,12 @@ public class ItemPreviewScreen extends DispenserScreen {
     }
 
     @Override
+    public void onClose() {
+        // The default also tells the server to close a container it never opened for us
+        mc.setScreen(null);
+    }
+
+    @Override
     protected void slotClicked(Slot slot, int slotId, int button, ClickType type) {
         // Look, don't touch
     }

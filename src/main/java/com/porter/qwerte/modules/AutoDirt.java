@@ -5,6 +5,9 @@ import com.porter.qwerte.compat.Players;
 import com.porter.qwerte.compat.RightClick;
 import com.porter.qwerte.modules.AutoTill.RestockMode;
 import com.porter.qwerte.utils.BaritoneHelper;
+import meteordevelopment.meteorclient.gui.GuiTheme;
+import meteordevelopment.meteorclient.gui.widgets.WWidget;
+import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
@@ -17,6 +20,7 @@ import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.nbt.CompoundTag;
 import net.minecraft.world.Container;
 import net.minecraft.tags.BlockTags;
 import net.minecraft.world.item.Item;
@@ -46,6 +50,7 @@ import java.util.function.Predicate;
 public class AutoDirt extends Module implements Restocker.Owner {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgRestock = settings.createGroup("Restock");
+    private final SettingGroup sgAutomation = settings.createGroup("Automation");
     private final SettingGroup sgRender = settings.createGroup("Render");
 
     // General
@@ -165,18 +170,26 @@ public class AutoDirt extends Module implements Restocker.Owner {
         .build()
     );
 
-    private final Setting<BlockPos> dirtStorage = sgRestock.add(new BlockPosSetting.Builder()
+    // The storages are listed in the module's GUI, this only holds them for saving
+    private final Setting<List<String>> storageData = sgRestock.add(new StringListSetting.Builder()
+        .name("dirt-storages")
+        .description("The containers to take dirt from, managed with pick-storage and the list below the settings.")
+        .visible(() -> false)
+        .build()
+    );
+
+    // Older versions kept a single storage here, it's folded into the list when the settings load
+    private final Setting<BlockPos> legacyStorage = sgRestock.add(new BlockPosSetting.Builder()
         .name("dirt-storage")
-        .description("Coordinates of the container to take dirt from. Walk-to-storage is needed if it's out of reach.")
+        .description("Old single dirt storage, moved into dirt-storages.")
         .defaultValue(BlockPos.ZERO)
-        .onChanged(pos -> restockUnavailable = false)
-        .visible(this::usingStorage)
+        .visible(() -> false)
         .build()
     );
 
     private final Setting<Boolean> pickStorage = sgRestock.add(new BoolSetting.Builder()
         .name("pick-storage")
-        .description("Turn on, then right-click a container to set it as the dirt storage. Works while the module is off.")
+        .description("Turn on, then right-click a container to add it to the dirt storages, or to remove it if it's already one. Turns itself off after one click. Works while the module is off.")
         .defaultValue(false)
         .visible(this::usingStorage)
         .build()
@@ -184,9 +197,38 @@ public class AutoDirt extends Module implements Restocker.Owner {
 
     private final Setting<Boolean> walkToStorage = sgRestock.add(new BoolSetting.Builder()
         .name("walk-to-storage")
-        .description("Uses Baritone to walk to the dirt storage when it's out of reach, then walks back.")
+        .description("Uses Baritone to walk to a dirt storage when it's out of reach, then walks back.")
         .defaultValue(false)
         .visible(this::usingStorage)
+        .build()
+    );
+
+    // Automation
+
+    private final Setting<Boolean> autoWalk = sgAutomation.add(new BoolSetting.Builder()
+        .name("auto-walk")
+        .description("Uses Baritone to walk to more uncovered ground when nothing is left in reach.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<Integer> searchRadius = sgAutomation.add(new IntSetting.Builder()
+        .name("search-radius")
+        .description("How far from where you enabled the module to look for ground to cover.")
+        .defaultValue(64)
+        .range(8, 128)
+        .sliderRange(8, 64)
+        .visible(autoWalk::get)
+        .build()
+    );
+
+    private final Setting<Integer> searchHeight = sgAutomation.add(new IntSetting.Builder()
+        .name("search-height")
+        .description("How many blocks above and below you to search. With below-feet-only on, depth is used below you instead.")
+        .defaultValue(1)
+        .range(1, 16)
+        .sliderRange(1, 8)
+        .visible(autoWalk::get)
         .build()
     );
 
@@ -231,7 +273,9 @@ public class AutoDirt extends Module implements Restocker.Owner {
     // Baritone is optional, BaritoneHelper must only be touched when it's installed
     private static final boolean BARITONE = classExists("baritone.api.BaritoneAPI");
 
-    private enum State { Working, GoingToStorage, Restocking, Returning }
+    private static final int STUCK_TICKS = 20 * 5;
+
+    private enum State { Working, Exploring, GoingToStorage, Restocking, Returning }
 
     private final List<BlockPos> targets = new ArrayList<>();
     private final Map<BlockPos, Integer> attempts = new HashMap<>();
@@ -240,6 +284,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
     private boolean warnedInventory;
 
     private final Restocker restocker = new Restocker(this, this::isDirtItem, "dirt");
+    private final StorageList storages = new StorageList(storageData, () -> restockUnavailable = false);
     private State state = State.Working;
     private boolean restockUnavailable;
     private int restockRetryTicks;
@@ -249,6 +294,16 @@ public class AutoDirt extends Module implements Restocker.Owner {
     private int stateTicks;
     private int pathRetries;
 
+    // Auto-walk
+    private BlockPos home;
+    private BlockPos pathTarget;
+    private int pathRange;
+    private int exploreCooldown;
+    private final Set<BlockPos> unreachable = new HashSet<>();
+    private int goalTicks;
+    private int stuckTicks;
+    private Vec3 lastPos = Vec3.ZERO;
+
     public AutoDirt() {
         super(QwerteAddon.CATEGORY, "auto-dirt", "Covers the ground around you with dirt, never stacking dirt on dirt.");
 
@@ -257,7 +312,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
     }
 
     /**
-     * Picks the dirt storage while pick-storage is on.
+     * Adds or removes a dirt storage while pick-storage is on.
      * @return true when picking, so the click doesn't open the container
      */
     private boolean onRightClick() {
@@ -275,11 +330,25 @@ public class AutoDirt extends Module implements Restocker.Owner {
             return true;
         }
 
-        dirtStorage.set(hit.getBlockPos().immutable());
+        storages.migrate(legacyStorage);
+        BlockPos pos = hit.getBlockPos().immutable();
+        boolean added = storages.toggle(pos);
         pickStorage.set(false);
-        restockUnavailable = false;
-        info("Dirt storage set to %s.", dirtStorage.get().toShortString());
+        info("%s storage at %s (%d storages).", added ? "Added" : "Removed", pos.toShortString(), storages.size());
         return true;
+    }
+
+    @Override
+    public Module fromTag(CompoundTag tag) {
+        Module module = super.fromTag(tag);
+        storages.migrate(legacyStorage);
+        return module;
+    }
+
+    @Override
+    public WWidget getWidget(GuiTheme theme) {
+        storages.migrate(legacyStorage);
+        return storages.widget(theme, "Dirt storages", this::usingStorage);
     }
 
     @Override
@@ -293,8 +362,17 @@ public class AutoDirt extends Module implements Restocker.Owner {
         state = State.Working;
         restockUnavailable = false;
         restockRetryTicks = 0;
+        storages.migrate(legacyStorage);
+        storages.resetSession();
         returnPos = null;
         slotBefore = -1;
+
+        home = mc.player != null ? mc.player.blockPosition() : null;
+        pathTarget = null;
+        exploreCooldown = 0;
+        unreachable.clear();
+        goalTicks = 0;
+        stuckTicks = 0;
     }
 
     @Override
@@ -313,8 +391,27 @@ public class AutoDirt extends Module implements Restocker.Owner {
     }
 
     @EventHandler
+    private void onGameLeft(GameLeftEvent event) {
+        if (state == State.Restocking) restocker.cancel();
+
+        if (usedBaritone) {
+            BaritoneHelper.stop();
+            BaritoneHelper.unprotect();
+            usedBaritone = false;
+        }
+
+        // The world is gone, so is everything we knew about it. onActivate resets the rest.
+        slotBefore = -1;
+        onActivate();
+    }
+
+    @EventHandler
     private void onTick(TickEvent.Pre event) {
         targets.clear();
+        storages.tick();
+
+        // onActivate can run before the player exists
+        if (home == null) home = mc.player.blockPosition();
 
         // A failed restock only pauses restocking, try again after a while
         if (restockUnavailable && restockRetryTicks > 0 && --restockRetryTicks == 0) restockUnavailable = false;
@@ -323,6 +420,11 @@ public class AutoDirt extends Module implements Restocker.Owner {
         if (state != State.Working) {
             tickRestock();
             return;
+        }
+
+        if (autoWalk.get() && !BARITONE) {
+            error("Baritone isn't installed, turning off auto-walk.");
+            autoWalk.set(false);
         }
 
         // Low on dirt comes first, then we cover the ground with a full inventory
@@ -338,7 +440,11 @@ public class AutoDirt extends Module implements Restocker.Owner {
         attempts.keySet().removeIf(pos -> eyes.distanceToSqr(Vec3.atCenterOf(pos)) > forgetSq);
 
         findTargets(eyes);
-        if (targets.isEmpty()) return;
+        if (targets.isEmpty()) {
+            // Nothing left in reach, go find more ground to cover (only worth it if we've got dirt to place)
+            if (walking() && InvUtils.find(this::isDirtItem).found()) startExplore(eyes);
+            return;
+        }
 
         FindItemResult dirt = InvUtils.findInHotbar(this::isDirtItem);
         if (!dirt.found()) {
@@ -373,6 +479,8 @@ public class AutoDirt extends Module implements Restocker.Owner {
 
             if (attempts.merge(pos, 1, Integer::sum) > MAX_ATTEMPTS) {
                 failed.add(pos);
+                // failed is pruned once we're away, unreachable lasts the session so auto-walk never goes back for it
+                unreachable.add(pos);
                 continue;
             }
 
@@ -453,31 +561,63 @@ public class AutoDirt extends Module implements Restocker.Owner {
             return;
         }
 
-        BlockPos storage = dirtStorage.get();
-        if (storage.equals(BlockPos.ZERO)) {
-            blockRestock("No dirt storage set, use pick-storage or enter its coordinates.");
+        storages.beginAttempt();
+        if (storages.isEmpty()) {
+            blockRestock("No dirt storage set, use pick-storage.");
             return;
         }
+
+        if (!tryNextStorage()) noStorageLeft();
+    }
+
+    /**
+     * Starts on the next storage that's worth trying, in reach first and then nearest.
+     * @return false when there's none left to try
+     */
+    private boolean tryNextStorage() {
+        BlockPos storage = storages.next(mc.player.getEyePosition(), this::inReach, walkToStorage.get() && BARITONE);
+        if (storage == null) return false;
 
         if (inReach(storage)) {
             restocker.startManual(storage);
             startRestockingHere();
-            return;
+            return true;
         }
 
-        if (!walkToStorage.get()) {
-            blockRestock("The dirt storage at %s is out of reach, turn on walk-to-storage to walk there.", storage.toShortString());
-            return;
-        }
-
-        if (!BARITONE) {
-            blockRestock("Baritone isn't installed, so I can't walk to the dirt storage at %s.", storage.toShortString());
-            return;
-        }
-
-        returnPos = mc.player.blockPosition();
-        slotBefore = Players.selectedSlot();
+        // Several storages in one go still head back to where we started from
+        if (returnPos == null) returnPos = mc.player.blockPosition();
+        if (slotBefore < 0) slotBefore = Players.selectedSlot();
         walkTo(storage, 2, State.GoingToStorage);
+        return true;
+    }
+
+    /**
+     * No storage is left to try: turns restocking off if they're all empty, pauses it otherwise.
+     */
+    private void noStorageLeft() {
+        if (storages.allEmpty()) {
+            error("All %d dirt storages are empty. Turning off restock.", storages.size());
+            restock.set(false);
+            storages.forgetEmpty();
+        }
+        else if (storages.skippedOutOfReach() && !walkToStorage.get()) {
+            blockRestock("The dirt storages are out of reach, turn on walk-to-storage to walk there.");
+        }
+        else if (storages.skippedOutOfReach()) {
+            blockRestock("Baritone isn't installed, so I can't walk to the dirt storages.");
+        }
+        else blockRestock("Couldn't use any of the dirt storages.");
+    }
+
+    /**
+     * A storage failed and there's none left to try. If an earlier one got us enough dirt, that still counts.
+     */
+    private void noStorageFinished(String reason) {
+        int count = InvUtils.find(this::isDirtItem).count();
+
+        if (storages.allEmpty()) noStorageLeft();
+        else if (count > restockAt.get()) info("Restocked dirt, you now have %d.", count);
+        else blockRestock("%s", reason);
     }
 
     private void startRestockingHere() {
@@ -497,18 +637,41 @@ public class AutoDirt extends Module implements Restocker.Owner {
                     case Done -> {
                         int count = InvUtils.find(this::isDirtItem).count();
 
-                        if (restocker.sourceEmpty()) {
-                            warning("Restocked to %d dirt, but that emptied your %s. Turning off restock.", count, sourceName());
-                            restock.set(false);
+                        if (restockMode.get() == RestockMode.Storage) {
+                            if (restocker.sourceEmpty()) storages.markEmpty(storages.current());
+
+                            // Still low, so carry on with the next storage before heading back
+                            if (count <= restockAt.get() && tryNextStorage()) return;
+
+                            if (storages.allEmpty()) {
+                                warning("Restocked to %d dirt, but that emptied all %d dirt storages. Turning off restock.", count, storages.size());
+                                restock.set(false);
+                                storages.forgetEmpty();
+                            }
+                            // Restocking goes first, so storages that have run dry would otherwise send us straight back
+                            else if (count <= restockAt.get()) blockRestock("Restocked, but you only have %d dirt. Are the storages running low?", count);
+                            else info("Restocked dirt, you now have %d.", count);
                         }
-                        // Restocking goes first, so a storage that's run dry would otherwise send us straight back
-                        else if (count <= restockAt.get()) blockRestock("Restocked, but you only have %d dirt. Is the storage running low?", count);
-                        else info("Restocked dirt, you now have %d.", count);
+                        else {
+                            if (restocker.sourceEmpty()) {
+                                warning("Restocked to %d dirt, but that emptied your %s. Turning off restock.", count, sourceName());
+                                restock.set(false);
+                            }
+                            else if (count <= restockAt.get()) blockRestock("Restocked, but you only have %d dirt. Is the storage running low?", count);
+                            else info("Restocked dirt, you now have %d.", count);
+                        }
 
                         goBack();
                     }
                     case Failed -> {
-                        restockFailed(restocker.failure());
+                        if (restockMode.get() == RestockMode.Storage) {
+                            if (restocker.sourceEmpty()) storages.markEmpty(storages.current());
+                            else storages.markBad(storages.current());
+
+                            if (tryNextStorage()) return;
+                            noStorageFinished(restocker.failure());
+                        }
+                        else restockFailed(restocker.failure());
                         goBack();
                     }
                 }
@@ -516,18 +679,35 @@ public class AutoDirt extends Module implements Restocker.Owner {
             case GoingToStorage -> {
                 if (stillWalking()) return;
 
-                if (inReach(dirtStorage.get())) {
-                    restocker.startManual(dirtStorage.get());
+                BlockPos storage = storages.current();
+                if (storage != null && inReach(storage)) {
+                    restocker.startManual(storage);
                     state = State.Restocking;
                     stateTicks = 0;
                 }
                 else {
-                    blockRestock("Couldn't reach the dirt storage at %s.", dirtStorage.get().toShortString());
+                    storages.markBad(storage);
+                    if (tryNextStorage()) return;
+                    noStorageFinished(storage == null ? "Couldn't reach the dirt storage." : "Couldn't reach the dirt storage at " + storage.toShortString() + ".");
                     goBack();
                 }
             }
             case Returning -> {
                 if (stillWalking()) return;
+                finishRestock();
+            }
+            case Exploring -> {
+                if (!walking()) {
+                    if (BARITONE) BaritoneHelper.stop();
+                    finishRestock();
+                    return;
+                }
+
+                // Close enough to start working, no need to walk the last step
+                if (stateTicks > PATH_GRACE_TICKS && inReach(pathTarget)) BaritoneHelper.stop();
+                else if (stillWalking()) return;
+
+                if (!inReach(pathTarget)) unreachable.add(pathTarget);
                 finishRestock();
             }
             default -> finishRestock();
@@ -582,14 +762,24 @@ public class AutoDirt extends Module implements Restocker.Owner {
         BaritoneHelper.protect(List.of(Blocks.FARMLAND));
         usedBaritone = true;
 
+        // Baritone picks its own tools and blocks while it walks, remember what we were holding
+        if (state == State.Working && slotBefore < 0) slotBefore = Players.selectedSlot();
+
+        pathTarget = pos;
+        pathRange = range;
         BaritoneHelper.moveNear(pos, range);
+
         state = next;
         stateTicks = 0;
+        goalTicks = 0;
+        stuckTicks = 0;
         pathRetries = 0;
+        lastPos = mc.player.position();
     }
 
     /**
-     * @return true while Baritone is still on its way, giving it a few nudges if it stops early
+     * Waits for Baritone to finish the current trip, nudging it if it stalls.
+     * @return true while still on the way
      */
     private boolean stillWalking() {
         if (stateTicks > PATH_TIMEOUT_TICKS) {
@@ -598,17 +788,115 @@ public class AutoDirt extends Module implements Restocker.Owner {
         }
 
         // Baritone needs a moment to start pathing after a goal is set
-        if (stateTicks < PATH_GRACE_TICKS || BaritoneHelper.isMoving()) return true;
+        if (goalTicks++ < PATH_GRACE_TICKS) return true;
 
-        BlockPos target = state == State.GoingToStorage ? dirtStorage.get() : null;
-        boolean arrived = target == null || inReach(target);
-        if (!arrived && pathRetries++ < 3) {
-            BaritoneHelper.moveNear(target, 2);
-            stateTicks = 0;
-            return true;
+        Vec3 pos = mc.player.position();
+        if (pos.distanceToSqr(lastPos) > 0.25) {
+            lastPos = pos;
+            stuckTicks = 0;
+        }
+        else if (!BaritoneHelper.isCalculating()) stuckTicks++;
+
+        // Baritone sometimes stalls, or quietly gives up short of the goal. Give it a few nudges before calling it a failure.
+        boolean moving = BaritoneHelper.isMoving();
+        if ((moving && stuckTicks > STUCK_TICKS) || (!moving && !atGoal())) {
+            if (pathRetries++ < 3) {
+                BaritoneHelper.moveNear(pathTarget, pathRange);
+                goalTicks = 0;
+                stuckTicks = 0;
+                return true;
+            }
+
+            if (moving) BaritoneHelper.stop();
+            return false;
         }
 
-        return false;
+        return moving;
+    }
+
+    private boolean atGoal() {
+        // Being in reach of the storage or the spot to cover is as good as arriving
+        if ((state == State.GoingToStorage || state == State.Exploring) && inReach(pathTarget)) return true;
+
+        BlockPos feet = mc.player.blockPosition();
+        int dx = feet.getX() - pathTarget.getX();
+        int dy = feet.getY() - pathTarget.getY();
+        int dz = feet.getZ() - pathTarget.getZ();
+        return dx * dx + dy * dy + dz * dz <= pathRange * pathRange;
+    }
+
+    // Exploring
+
+    private boolean walking() {
+        return autoWalk.get() && BARITONE;
+    }
+
+    /**
+     * How close Baritone needs to get to a spot before it's comfortably in reach.
+     */
+    private int exploreRange() {
+        return (int) Math.max(1, Math.floor(reach.get() - 1.5));
+    }
+
+    private void startExplore(Vec3 eyes) {
+        if (exploreCooldown > 0) {
+            exploreCooldown--;
+            return;
+        }
+
+        BlockPos target = findGround(eyes);
+        if (target == null) {
+            info("No more ground to cover within %d blocks, waiting.", searchRadius.get());
+            exploreCooldown = 200;
+            return;
+        }
+
+        walkTo(target, exploreRange(), State.Exploring);
+    }
+
+    /**
+     * The nearest spot to cover in the search area around home that's out of reach and hasn't failed us.
+     */
+    private BlockPos findGround(Vec3 eyes) {
+        if (home == null) home = mc.player.blockPosition();
+
+        int radius = searchRadius.get();
+        BlockPos feet = mc.player.blockPosition();
+        int minY = belowFeet.get() ? feet.getY() - depth.get() : feet.getY() - searchHeight.get();
+        int maxY = belowFeet.get() ? feet.getY() : feet.getY() + searchHeight.get();
+        double reachSq = reach.get() * reach.get();
+
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+        BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
+
+        // Column by column: unloaded chunks are skipped, and the distance is worked out without allocating anything
+        for (int x = home.getX() - radius; x <= home.getX() + radius; x++) {
+            double dx = x + 0.5 - eyes.x;
+            double dx2 = dx * dx;
+            if (dx2 >= bestDist) continue;
+
+            for (int z = home.getZ() - radius; z <= home.getZ() + radius; z++) {
+                double dz = z + 0.5 - eyes.z;
+                double dxz = dx2 + dz * dz;
+                if (dxz >= bestDist || !mc.level.hasChunk(x >> 4, z >> 4)) continue;
+
+                for (int y = minY; y <= maxY; y++) {
+                    double dy = y + 0.5 - eyes.y;
+                    double dist = dxz + dy * dy;
+                    if (dist <= reachSq || dist >= bestDist) continue;
+
+                    pos.set(x, y, z);
+                    if (failed.contains(pos) || unreachable.contains(pos)) continue;
+                    if (!isTarget(pos)) continue;
+
+                    best = pos.immutable();
+                    bestDist = dist;
+                }
+            }
+        }
+
+        return best;
     }
 
     private boolean inReach(BlockPos pos) {

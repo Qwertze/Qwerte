@@ -4,6 +4,9 @@ import com.porter.qwerte.QwerteAddon;
 import com.porter.qwerte.compat.RightClick;
 import com.porter.qwerte.stash.Categories;
 import com.porter.qwerte.stash.ItemPreviewScreen;
+import com.porter.qwerte.stash.Kit;
+import com.porter.qwerte.stash.KitPreviewScreen;
+import com.porter.qwerte.stash.Kits;
 import com.porter.qwerte.stash.Stash;
 import com.porter.qwerte.stash.Stash.Box;
 import com.porter.qwerte.utils.BaritoneHelper;
@@ -21,6 +24,7 @@ import meteordevelopment.meteorclient.gui.widgets.containers.WTable;
 import meteordevelopment.meteorclient.gui.widgets.containers.WVerticalList;
 import meteordevelopment.meteorclient.gui.widgets.input.WTextBox;
 import meteordevelopment.meteorclient.gui.widgets.pressable.WButton;
+import meteordevelopment.meteorclient.gui.widgets.pressable.WMinus;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -82,6 +86,7 @@ public class StashSorter extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgBot = settings.createGroup("Bot");
     private final SettingGroup sgShulkers = settings.createGroup("Shulkers");
+    private final SettingGroup sgKits = settings.createGroup("Kits");
     private final SettingGroup sgSlots = settings.createGroup("Slots");
     private final SettingGroup sgSearch = settings.createGroup("Search");
     private final SettingGroup sgRender = settings.createGroup("Render");
@@ -238,6 +243,15 @@ public class StashSorter extends Module {
         .build()
     );
 
+    // Kits
+
+    private final Setting<Boolean> buildKits = sgKits.add(new BoolSetting.Builder()
+        .name("build-kits")
+        .description("Signs mode: builds the kits saved below out of the stash, as many as it can. Takes an empty shulker, gathers the items, and fills it slot for slot with the saved counts, then files it in the chest signed with the kit's name (or \"<name> kit\"). A kit with no such chest isn't built. Uses every empty shulker in the stash.")
+        .defaultValue(false)
+        .build()
+    );
+
     // Slots
 
     private final Setting<String> carrySlots = sgSlots.add(new StringSetting.Builder()
@@ -338,7 +352,7 @@ public class StashSorter extends Module {
         Pattern.compile("^(\\w{3,16}) -> (?:me|you): (.+)$")
     };
 
-    private enum Job { Survey, Take, Deposit, Dump, Fetch, Clean, Fill, Compact }
+    private enum Job { Survey, Take, Deposit, Dump, Fetch, Clean, Fill, Compact, KitTake, KitUnpack, KitFill }
 
     private enum Step { Walking, Opening, Working }
 
@@ -386,6 +400,56 @@ public class StashSorter extends Module {
     private final Set<Integer> shulkerSlotsBefore = new HashSet<>();
     private boolean repackFailed;
     private final Set<Item> packTried = new HashSet<>();
+
+    // Building kits
+    private final KitBuilder kitBuilder = new KitBuilder(new KitBuilder.Owner() {
+        @Override
+        public Stash stash() {
+            return stash;
+        }
+
+        @Override
+        public Set<Integer> carry() {
+            return carry;
+        }
+
+        @Override
+        public int freeCarrySlot() {
+            return StashSorter.this.freeCarrySlot();
+        }
+
+        @Override
+        public int freeCarryCount() {
+            return StashSorter.this.freeCarryCount();
+        }
+
+        @Override
+        public boolean usable(Box box) {
+            return !stalled.contains(box) && !box.unreachable;
+        }
+
+        @Override
+        public boolean keepWhole(Box box) {
+            return box.labels.stream().anyMatch(Categories::isKeepWhole);
+        }
+
+        @Override
+        public double distance(Box box) {
+            return mc.player.getEyePosition().distanceToSqr(Vec3.atCenterOf(nearestPart(box)));
+        }
+
+        @Override
+        public void say(String text) {
+            info("%s", text);
+        }
+
+        @Override
+        public void warn(String text) {
+            warning("%s", text);
+        }
+    });
+    private int collectedSlot = -1;
+    private int seenKits;
 
     // Bot mode
     private boolean idle;
@@ -435,6 +499,8 @@ public class StashSorter extends Module {
         handle = null;
         repackFailed = false;
         packTried.clear();
+        kitBuilder.reset();
+        collectedSlot = -1;
 
         if (!pickCarrySlots()) {
             toggle();
@@ -490,6 +556,7 @@ public class StashSorter extends Module {
             warning("Stopped while repacking, there's a shulker left at %s.", placed.toShortString());
         }
         handle = null;
+        kitBuilder.deactivate();
 
         if (stash != null && stash.isDirty()) stash.save();
 
@@ -602,11 +669,17 @@ public class StashSorter extends Module {
             }
         }
 
+        if (Kits.version() != seenKits) {
+            seenKits = Kits.version();
+            version++;
+        }
+
         if (version != seenVersion) {
             seenVersion = version;
             stalled.clear();
             compacted.clear();
             packTried.clear();
+            kitBuilder.wake();
             idle = false;
             return true;
         }
@@ -654,6 +727,15 @@ public class StashSorter extends Module {
         destCache = new HashMap<>();
         misplacedCache = new HashMap<>();
 
+        // A kit being built carries on until it's finished or given up on
+        if (kitBuilder.active()) {
+            if (!kitsOn()) {
+                kitBuilder.suspend(repackFailed ? "placing shulkers failed earlier this run, so no more shulker work."
+                    : mode.get() != Mode.Signs ? "kits are only built in Signs mode." : "build-kits was switched off.");
+            }
+            else if (runKit(kitBuilder.next())) return true;
+        }
+
         if (repackOn() && nextRepackJob()) return true;
 
         List<Integer> carried = carriedSlots();
@@ -684,7 +766,7 @@ public class StashSorter extends Module {
             Box best = null;
             int bestSlot = -1;
             for (Box box : stash.boxes) {
-                if (!box.sortable() || stalled.contains(box)) continue;
+                if (!box.sortable() || stalled.contains(box) || isKitBox(box)) continue;
                 for (int i = 0; i < box.contents.length; i++) {
                     if (!strays(box.contents[i]).isEmpty() && (best == null || closer(box, best))) {
                         best = box;
@@ -706,8 +788,53 @@ public class StashSorter extends Module {
             return start(Job.Compact, messy);
         }
 
+        // Nothing left to sort: build kits
+        if (kitsOn() && carriedSlots().isEmpty() && kitBuilder.begin() && runKit(kitBuilder.next())) return true;
+
         finishSorting();
         return false;
+    }
+
+    // Building kits
+
+    private boolean kitsOn() {
+        return buildKits.get() && mode.get() == Mode.Signs && !repackFailed;
+    }
+
+    /**
+     * Starts the job for the next step of the kit being built.
+     * @return true when a job was started, false when the kit is finished or given up on
+     */
+    private boolean runKit(KitBuilder.Intent intent) {
+        kitBuilder.jobStarted();
+
+        switch (intent) {
+            case KitBuilder.Take take -> {
+                if (start(Job.KitTake, take.box())) return true;
+                kitBuilder.suspend("couldn't reach " + take.box().pos.toShortString() + ".");
+            }
+            case KitBuilder.Fetch fetch -> {
+                if (fetch(fetch.box(), fetch.slot())) return true;
+                kitBuilder.suspend("couldn't reach " + fetch.box().pos.toShortString() + ".");
+            }
+            case KitBuilder.Unpack unpack -> {
+                return startHandling(Job.KitUnpack, unpack.slot(), null);
+            }
+            case KitBuilder.Fill fill -> {
+                return startHandling(Job.KitFill, fill.slot(), null);
+            }
+            case KitBuilder.Done done -> kitBuilder.finish();
+            case KitBuilder.Abort abort -> kitBuilder.suspend(abort.reason());
+        }
+        return false;
+    }
+
+    private boolean isKitJob() {
+        return job == Job.KitTake || job == Job.KitUnpack || job == Job.KitFill;
+    }
+
+    private boolean isKitBox(Box box) {
+        return Kits.isKitBox(box);
     }
 
     // Repacking shulkers
@@ -749,7 +876,7 @@ public class StashSorter extends Module {
                 Box from = null;
                 int fromSlot = -1;
                 for (Box box : stash.boxes) {
-                    if (!box.sortable() || box.dropOff || stalled.contains(box)) continue;
+                    if (!box.sortable() || box.dropOff || stalled.contains(box) || isKitBox(box)) continue;
                     for (int i = 0; i < box.contents.length; i++) {
                         ItemStack s = box.contents[i];
                         boolean usable = bulkWithRoom(s, item) || (newBulkAt.get() > 0 && stacks >= newBulkAt.get() && emptyShulker(s));
@@ -787,6 +914,9 @@ public class StashSorter extends Module {
         ItemStack main = Categories.dominantContent(shulker);
         if (main == null) return List.of();
 
+        // A saved kit, finished or part built, stays whole
+        if (isKitShulker(shulker)) return List.of();
+
         // A chest signed for kits takes mixed shulkers whole instead
         if (!keepWholeBoxes().isEmpty()) return List.of();
 
@@ -801,10 +931,18 @@ public class StashSorter extends Module {
     }
 
     /**
+     * A finished or mixed part-built kit, or what is left of a kit just given up on. A one-kind shulker that merely
+     * fits inside a kit is an ordinary bulk shulker.
+     */
+    private boolean isKitShulker(ItemStack shulker) {
+        return Kits.claims(shulker) || kitBuilder.heldKit(shulker) != null;
+    }
+
+    /**
      * A shulker holding only {@code item}, with room for more.
      */
-    private static boolean bulkWithRoom(ItemStack shulker, Item item) {
-        if (shulker == null || shulker.isEmpty() || !Utils.isShulker(shulker.getItem()) || shulker.has(DataComponents.CUSTOM_NAME)) return false;
+    private boolean bulkWithRoom(ItemStack shulker, Item item) {
+        if (shulker == null || shulker.isEmpty() || !Utils.isShulker(shulker.getItem()) || shulker.has(DataComponents.CUSTOM_NAME) || isKitShulker(shulker)) return false;
 
         boolean any = false, room = false;
         for (ItemStack s : inside(shulker)) {
@@ -820,7 +958,7 @@ public class StashSorter extends Module {
     }
 
     private static boolean emptyShulker(ItemStack shulker) {
-        if (shulker == null || shulker.isEmpty() || !Utils.isShulker(shulker.getItem()) || shulker.has(DataComponents.CUSTOM_NAME)) return false;
+        if (shulker == null || shulker.isEmpty() || !Utils.isShulker(shulker.getItem()) || shulker.has(DataComponents.CUSTOM_NAME) || Kits.claims(shulker)) return false;
         for (ItemStack s : inside(shulker)) if (s != null && !s.isEmpty()) return false;
         return true;
     }
@@ -857,6 +995,7 @@ public class StashSorter extends Module {
         handleTicks = 0;
         placed = null;
         actions = 0;
+        collectedSlot = -1;
         return true;
     }
 
@@ -967,7 +1106,12 @@ public class StashSorter extends Module {
             return;
         }
 
-        boolean busy = job == Job.Clean ? takeStray(menu) : packOne(menu);
+        boolean busy = switch (job) {
+            case Clean -> takeStray(menu);
+            case KitUnpack -> kitBuilder.unpackOne(menu);
+            case KitFill -> kitBuilder.fillOne(menu);
+            default -> packOne(menu);
+        };
         if (busy) {
             actions++;
             wait = delay.get();
@@ -977,6 +1121,11 @@ public class StashSorter extends Module {
         if (job == Job.Fill && actions == 0) packTried.add(fillItem);
         // Nothing to take out after all: stop trying, or we'd keep reopening the same shulker
         if (job == Job.Clean && actions == 0) repackFailed = true;
+        if (isKitJob()) {
+            // Never close with something on the cursor, it would be merged into the inventory or dropped
+            if (!menu.getCarried().isEmpty()) recoverCursor();
+            if (actions == 0) kitBuilder.suspend("there was nothing I could move in the shulker.");
+        }
         mc.player.closeContainer();
         handle = Handle.Break;
         handleTicks = 0;
@@ -1057,9 +1206,13 @@ public class StashSorter extends Module {
             // Picked up: make sure it's in a carry slot, so it gets put away
             for (int i = 0; i < 36; i++) {
                 if (shulkerSlotsBefore.contains(i) || !Utils.isShulker(mc.player.getInventory().getItem(i).getItem())) continue;
+                collectedSlot = i;
                 if (!carry.contains(i)) {
                     int free = freeCarrySlot();
-                    if (free != -1) InvUtils.move().from(i).to(free);
+                    if (free != -1) {
+                        InvUtils.move().from(i).to(free);
+                        collectedSlot = free;
+                    }
                     else warning("The repacked shulker ended up outside the carry slots, in slot %d.", i + 1);
                 }
                 break;
@@ -1091,6 +1244,7 @@ public class StashSorter extends Module {
     }
 
     private void endHandling() {
+        if (job == Job.KitFill || job == Job.KitUnpack) kitBuilder.handled(job == Job.KitFill, collectedSlot >= 0 ? collectedSlot : handledSlot);
         handle = null;
         placed = null;
         if (stash.isDirty()) stash.save();
@@ -1100,6 +1254,7 @@ public class StashSorter extends Module {
 
     private void failHandling(String why) {
         warning("%s Stopping.", why);
+        if (isKitJob()) kitBuilder.suspend(why);
         handle = null;
         job = null;
         toggle();
@@ -1271,7 +1426,8 @@ public class StashSorter extends Module {
         read(target);
 
         boolean busy = switch (job) {
-            case Survey, Clean, Fill -> false;
+            case Survey, Clean, Fill, KitUnpack, KitFill -> false;
+            case KitTake -> kitBuilder.takeOne(target);
             case Take -> takeOne();
             case Fetch -> fetchOne();
             case Compact -> compactOne();
@@ -1382,6 +1538,7 @@ public class StashSorter extends Module {
         if (!carried.isEmpty()) return recoverBounded();
 
         for (int slot : carriedSlots()) {
+            if (kitBuilder.holds(slot)) continue;
             ItemStack stack = mc.player.getInventory().getItem(slot);
             if (!destinationsFor(stack).contains(target)) continue;
 
@@ -1452,7 +1609,7 @@ public class StashSorter extends Module {
      */
     private boolean dumpOne() {
         for (int slot : carriedSlots()) {
-            if (!canFit(mc.player.getInventory().getItem(slot))) continue;
+            if (kitBuilder.holds(slot) || !canFit(mc.player.getInventory().getItem(slot))) continue;
 
             InvUtils.shiftClick().slotId(inventoryToMenu(slot, target.contents.length));
             return true;
@@ -1526,6 +1683,15 @@ public class StashSorter extends Module {
     private List<Box> computeDestinations(ItemStack stack) {
         if (mode.get() == Mode.Tiers) return tierBoxes.getOrDefault(tier(stack), List.of());
 
+        // A finished kit, or one part built with more than one kind of item, goes to the chest signed with its name.
+        // With no such chest it's treated like any other shulker.
+        Kits.Match kit = Kits.match(stack);
+        Kit owner = kit != null && kit.claims() ? kit.kit() : kitBuilder.heldKit(stack);
+        if (owner != null) {
+            List<Box> homes = Kits.homes(owner, stash);
+            if (!homes.isEmpty()) return homes;
+        }
+
         // A shulker goes where what it's mostly full of goes: a shulker of totems belongs with the totems. Only when
         // no sign describes its contents does it fall back to signs about shulkers themselves, like "shulkers" or "kits".
         // Mixed shulkers go whole to a chest signed for kits, when there is one
@@ -1553,6 +1719,9 @@ public class StashSorter extends Module {
         for (Box box : stash.boxes) {
             if (!box.sortable() || box.dropOff) continue;
 
+            // Kit chests only take their kits, not loose items that happen to match the name
+            if (isKitBox(box)) continue;
+
             int score = 0;
             for (String label : box.labels) score = Math.max(score, Categories.signScore(label, item));
 
@@ -1572,6 +1741,12 @@ public class StashSorter extends Module {
     private boolean misplaced(ItemStack stack, Box box) {
         // Nothing stays in a drop-off
         if (box.dropOff) return true;
+
+        // A kit, or part of one, in its own chest is where it belongs
+        if (mode.get() == Mode.Signs) {
+            Kits.Match kit = Kits.match(stack);
+            if (kit != null && Kits.isHome(box, kit.kit())) return false;
+        }
 
         List<Box> places = destinationsFor(stack);
         return !places.isEmpty() && !places.contains(box);
@@ -1859,6 +2034,8 @@ public class StashSorter extends Module {
             interactPos = null;
             interactMenu = null;
             replies.clear();
+            kitBuilder.reset();
+            Kits.clear();
         }
 
         @EventHandler
@@ -2022,7 +2199,75 @@ public class StashSorter extends Module {
         WTable results = list.add(theme.table()).expandX().widget();
         search.action = () -> fillResults(theme, results, search.get());
 
+        list.add(theme.horizontalSeparator("Kits"));
+        WHorizontalList saveRow = list.add(theme.horizontalList()).expandX().widget();
+        WTextBox kitName = saveRow.add(theme.textBox("", "Kit name")).expandX().widget();
+        WButton saveKit = saveRow.add(theme.button("Save kit")).widget();
+        saveKit.tooltip = "Saves what's in your 27 main inventory slots (not the hotbar, offhand or armor) as a kit, with the same items in the same slots and the same counts.";
+        WLabel kitStatus = list.add(theme.label("Put a kit in your main inventory, name it and save it.")).expandX().widget();
+        WTable kits = list.add(theme.table()).expandX().widget();
+
+        saveKit.action = () -> {
+            String name = kitName.get().trim();
+            String error = Kits.saveFromInventory(name);
+            if (error != null) {
+                kitStatus.set(error);
+                return;
+            }
+            kitName.set("");
+            kitStatus.set("Saved kit \"" + name + "\".");
+            fillKits(theme, kits, kitStatus);
+        };
+        fillKits(theme, kits, kitStatus);
+
         return list;
+    }
+
+    // The kit being asked to delete, until it's clicked again
+    private Kit armedDelete;
+
+    private void fillKits(GuiTheme theme, WTable table, WLabel status) {
+        table.clear();
+        armedDelete = null;
+        if (mc.level == null || mc.player == null) {
+            table.add(theme.label("Join a server to see its kits."));
+            return;
+        }
+
+        List<Kit> saved = new ArrayList<>(Kits.all());
+        if (saved.isEmpty()) {
+            table.add(theme.label("No kits saved on this server."));
+            return;
+        }
+
+        Stash current = ensureStash();
+        for (Kit kit : saved) {
+            ItemStack icon = ItemStack.EMPTY;
+            for (int i = 0; i < Kit.SLOTS && icon.isEmpty(); i++) icon = kit.stackAt(i);
+            table.add(theme.item(icon.copyWithCount(1)));
+            table.add(theme.label(kit.name)).expandX();
+
+            int possible = current == null ? 0 : kitBuilder.possible(kit);
+            String more = possible < 0 ? String.format("no chest signed \"%s\"", kit.name) : String.format("%d more possible", possible);
+            table.add(theme.label(String.format("%d slots, %d built, %s", kit.slotCount(), Kits.built(kit, current), more)));
+
+            WButton view = table.add(theme.button("View")).widget();
+            view.action = () -> KitPreviewScreen.open(kit);
+
+            WMinus delete = table.add(theme.minus()).widget();
+            delete.tooltip = "Click twice to delete this kit.";
+            delete.action = () -> {
+                if (armedDelete != kit) {
+                    armedDelete = kit;
+                    status.set("Click the minus again to delete \"" + kit.name + "\".");
+                    return;
+                }
+                Kits.delete(kit);
+                fillKits(theme, table, status);
+                status.set("Deleted kit \"" + kit.name + "\".");
+            };
+            table.row();
+        }
     }
 
     private String statusText() {
