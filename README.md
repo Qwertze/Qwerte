@@ -161,7 +161,8 @@ Shulkers`. If you keep kits, give them a `Kits` chest so they aren't taken apart
 #### Excluded and drop-off containers
 - Set `pick` to **Exclude** and right-click containers it should never sort into or out of. Right-click again to undo.
 - Set `pick` to **Drop-off** and right-click containers to empty into the stash, for example a chest where friends
-  leave items.
+  leave items. Drop-offs are always emptied completely: anything without a home, or whose chest is full, goes to a
+  chest signed `Misc` (or `Other`, `Overflow`...), and failing that to any container with room.
 - Marks are saved with the stash and shown in red and blue while picking or sorting.
 
 #### Bot mode
