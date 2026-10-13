@@ -1,5 +1,5 @@
 [versions]
-mod-version = "0.2.7-dev.2"
+mod-version = "0.2.7"
 
 # Fabric (https://fabricmc.net/develop)
 fabric-loader = "0.18.2"
