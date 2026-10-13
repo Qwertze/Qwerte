@@ -8,10 +8,10 @@ Qwerte adds four modules to [Meteor Client](https://meteorclient.com):
   installed it can also walk to new land and to water by itself, so a whole field can be built hands-free.
 - **Auto Dirt** covers the ground around you with dirt, so stone, sand or netherrack can be turned into farmland. It
   never places dirt on top of dirt, and restocks its own dirt.
-- **Stash Sorter** *(dev builds only, experimental)* sorts the chests and barrels around you, either into tiers or by
-  the signs on them.
-- **Stash Overlay** *(dev builds only, experimental)* shows what each container in a saved stash mostly holds, as an
-  item icon on the container.
+- **Stash Sorter** sorts the chests and barrels around you, either into tiers or by the signs on them. It repacks
+  mixed shulkers, merges partial stacks, empties drop-off chests and can be searched. Want it on a proxy bot instead?
+  See [Stash Sorter for AquariusProxy](https://github.com/Qwertze/Stash-Sorter).
+- **Stash Overlay** shows what each container in a saved stash mostly holds, as an item icon on the container.
 
 | | |
 |---|---|
@@ -93,7 +93,7 @@ switched on and off on its own.
 - Can walk to a storage that's out of reach with Baritone, and back again.
 - Restocks before placing when you're low, and turns restocking off when the storage has run out of dirt.
 
-### Stash Sorter (experimental)
+### Stash Sorter
 
 #### A saved stash
 - The first time, it reads every chest, trapped chest and barrel within `radius` (a double chest counts as one) and
@@ -188,7 +188,7 @@ chest with three stacks of 20 cobblestone ends up with one of 60.
   `Diamond Can be Found At 120, 64, -300 @ stash`. Works with the module off. Replies are spaced out to avoid spam
   kicks.
 
-### Stash Overlay (experimental)
+### Stash Overlay
 - Draws the item each container holds most of as an icon on the container, so you can see what's where at a glance.
   It uses the stash saved by stash-sorter (the one named in its `stash-name`), so scan a stash with stash-sorter first.
 - Icons grow as you walk up to a container and shrink as you walk away, between `max-grow` and `min-shrink`. They
