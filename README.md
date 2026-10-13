@@ -23,7 +23,7 @@ Qwerte adds four modules to [Meteor Client](https://meteorclient.com):
 
 ## Features
 
-Auto Till and Auto Dirt are in Meteor's **Farming** category, Stash Sorter and Stash Overlay are in **Storage**. Every feature can be
+All four modules are in Meteor's **Qwerte** category. Every feature can be
 switched on and off on its own.
 
 ### Auto Till
@@ -186,8 +186,8 @@ Write signs the way you'd talk. Each line is read on its own, a sign's lines are
    [1.21.11](https://github.com/dekrom/baritone/releases/tag/v1.3.0-1.21.11) or
    [1.21.4](https://github.com/dekrom/baritone/releases/tag/v1.3.0-1.21.4)) and put it in your `mods` folder. Only have
    one Baritone jar installed at a time.
-5. Start the game. Qwerte shows up under Meteor in Mod Menu, and the **auto-till** and **auto-dirt** modules are in
-   Meteor's **Farming** category.
+5. Start the game. Qwerte shows up under Meteor in Mod Menu, and all of its modules are in
+   Meteor's **Qwerte** category.
 
 > **On 1.21.4:** Baritone for 1.21.4 has no setting to stop it placing blocks in water, so Qwerte can't switch that off
 > during trips. Filling buckets from the bank still keeps pools intact; just keep an eye on your pool the first time.
@@ -204,7 +204,7 @@ unless you're helping test.
 
 ## Setup guide
 
-Open Meteor's click GUI (Right Shift by default), go to **Farming** and open **auto-till**.
+Open Meteor's click GUI (Right Shift by default), go to **Qwerte** and open **auto-till**.
 
 Out of the box, auto-till waters, plants and walks with Baritone. Each step below says which setting controls that part.
 
@@ -243,7 +243,7 @@ around. The purple boxes are the blocks it's about to till.
 5. Carry a hoe, a few empty buckets, a water bucket, seeds and bone meal, then turn the module on and let it work.
 
 ### Covering ground with dirt
-1. Open **auto-dirt** in the **Farming** category.
+1. Open **auto-dirt** in the **Qwerte** category.
 2. Carry dirt (or the block picked in **dirt-item**) and turn the module on. The brown boxes are the spots it's about
    to fill.
 3. To restock, turn on **restock** in the **Restock** group and pick a **restock-mode**, set up the same way as seed
@@ -255,7 +255,7 @@ around. The purple boxes are the blocks it's about to till.
 2. For **Signs** mode, put signs on your containers saying what goes in each, in your own words.
 3. *(Optional)* Set `pick` to **Exclude** or **Drop-off** and right-click containers to mark them, then set it back to
    **Off**.
-4. Stand among the containers, open **stash-sorter** in the **Storage** category, name the stash in `stash-name`, pick
+4. Stand among the containers, open **stash-sorter** in the **Qwerte** category, name the stash in `stash-name`, pick
    a `mode` and turn it on. The first run reads every container, later runs go straight to sorting.
 5. Turn on `stay-on` to keep it running as a sorting bot.
 6. Search the stash anytime from the module's settings.
@@ -389,7 +389,7 @@ there; add its jar to `run/mods` if you want to try the automation.
 
 ```
 src/main/java/com/porter/qwerte/
-├── QwerteAddon.java          Addon entrypoint, registers the Farming and Storage categories and modules
+├── QwerteAddon.java          Addon entrypoint, registers the Qwerte category and modules
 ├── modules/
 │   ├── AutoTill.java         The auto-till module: tilling, watering, planting, automation
 │   ├── AutoDirt.java         The auto-dirt module: covering ground with dirt

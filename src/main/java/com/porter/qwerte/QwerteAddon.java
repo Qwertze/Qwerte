@@ -13,8 +13,7 @@ import org.slf4j.Logger;
 
 public class QwerteAddon extends MeteorAddon {
     public static final Logger LOG = LogUtils.getLogger();
-    public static final Category CATEGORY = new Category("Farming");
-    public static final Category STORAGE = new Category("Storage");
+    public static final Category CATEGORY = new Category("Qwerte");
 
     @Override
     public void onInitialize() {
@@ -30,7 +29,6 @@ public class QwerteAddon extends MeteorAddon {
     @Override
     public void onRegisterCategories() {
         Modules.registerCategory(CATEGORY);
-        Modules.registerCategory(STORAGE);
     }
 
     @Override

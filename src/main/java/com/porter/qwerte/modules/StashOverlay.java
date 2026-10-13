@@ -100,7 +100,7 @@ public class StashOverlay extends Module {
     private int refresh;
 
     public StashOverlay() {
-        super(QwerteAddon.STORAGE, "stash-overlay", "Shows what's in each container of a saved stash as an icon on the container. Uses the stash saved by stash-sorter.");
+        super(QwerteAddon.CATEGORY, "stash-overlay", "Shows what's in each container of a saved stash as an icon on the container. Uses the stash saved by stash-sorter.");
     }
 
     @Override

@@ -348,7 +348,7 @@ public class StashSorter extends Module {
     private int replyCooldown;
 
     public StashSorter() {
-        super(QwerteAddon.STORAGE, "stash-sorter", "Sorts a saved stash by tier or by sign, keeps it sorted, and lets you search it.");
+        super(QwerteAddon.CATEGORY, "stash-sorter", "Sorts a saved stash by tier or by sign, keeps it sorted, and lets you search it.");
 
         // Always listening: keeping the stash up to date, picking containers and whisper searches all work with the
         // module off
