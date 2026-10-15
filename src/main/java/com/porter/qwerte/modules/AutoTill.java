@@ -3,15 +3,20 @@ package com.porter.qwerte.modules;
 import com.porter.qwerte.QwerteAddon;
 import com.porter.qwerte.compat.Players;
 import com.porter.qwerte.compat.RightClick;
+import com.porter.qwerte.utils.AutoHotbar;
 import com.porter.qwerte.utils.BaritoneHelper;
+import com.porter.qwerte.utils.WorkPattern;
+import com.porter.qwerte.utils.WorkPattern.RowDirection;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.widgets.WWidget;
+import meteordevelopment.meteorclient.gui.widgets.containers.WVerticalList;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.player.Rotations;
@@ -28,7 +33,9 @@ import net.minecraft.world.InteractionHand;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.item.Items;
+import net.minecraft.world.item.enchantment.Enchantments;
 import net.minecraft.world.level.ClipContext;
+import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.BonemealableBlock;
@@ -44,9 +51,11 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 
@@ -54,6 +63,8 @@ public class AutoTill extends Module implements Restocker.Owner {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgPlanting = settings.createGroup("Planting");
     private final SettingGroup sgWater = settings.createGroup("Water");
+    private final SettingGroup sgIce = settings.createGroup("Ice");
+    private final SettingGroup sgHotbar = settings.createGroup("Hotbar");
     private final SettingGroup sgAutomation = settings.createGroup("Automation");
     private final SettingGroup sgSafety = settings.createGroup("Safety");
     private final SettingGroup sgRender = settings.createGroup("Render");
@@ -103,7 +114,7 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     private final Setting<Boolean> autoSwitch = sgGeneral.add(new BoolSetting.Builder()
         .name("auto-switch")
-        .description("Switches to a hoe, shovel or water bucket in your hotbar when needed.")
+        .description("Switches to a hoe, shovel, water bucket, ice or glowstone in your hotbar when needed.")
         .defaultValue(true)
         .build()
     );
@@ -118,7 +129,7 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     private final Setting<Boolean> rotate = sgGeneral.add(new BoolSetting.Builder()
         .name("rotate")
-        .description("Faces the block being tilled or dug. Placing water always rotates, since buckets use your look direction.")
+        .description("Faces the block being tilled or dug. Placing water, ice and glowstone always rotates, since they use your look direction.")
         .defaultValue(false)
         .build()
     );
@@ -166,7 +177,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         .name("restock-mode")
         .description("Storage: take seeds from a container you pick. Ender Chest: place your ender chest, take seeds from a shulker inside, put everything back and pick the ender chest up with a silk touch pickaxe.")
         .defaultValue(RestockMode.Storage)
-        .onChanged(mode -> restockUnavailable = false)
+        .onChanged(mode -> this.seedSupply.unavailable = false)
         .visible(() -> autoPlant.get() && seedRestock.get())
         .build()
     );
@@ -202,7 +213,56 @@ public class AutoTill extends Module implements Restocker.Owner {
         .name("pick-storage")
         .description("Turn on, then right-click a container to add it to the seed storages, or to remove it if it's already one. Turns itself off after one click. Works while the module is off.")
         .defaultValue(false)
+        .onChanged(on -> {
+            if (on) this.onlyPick(this.pickStorage);
+        })
         .visible(this::usingStorage)
+        .build()
+    );
+
+    private final Setting<Boolean> boneMealRestock = sgPlanting.add(new BoolSetting.Builder()
+        .name("bone-meal-restock")
+        .description("Restocks bone meal when you run low.")
+        .defaultValue(false)
+        .visible(() -> autoPlant.get() && boneMeal.get())
+        .build()
+    );
+
+    private final Setting<RestockMode> boneMealRestockMode = sgPlanting.add(new EnumSetting.Builder<RestockMode>()
+        .name("bone-meal-restock-mode")
+        .description("Storage: take bone meal from a container you pick. Ender Chest: place your ender chest, take bone meal from a shulker inside, put everything back and pick the ender chest up with a silk touch pickaxe.")
+        .defaultValue(RestockMode.Storage)
+        .onChanged(mode -> this.boneMealSupply.unavailable = false)
+        .visible(() -> (autoPlant.get() && boneMeal.get()) && boneMealRestock.get())
+        .build()
+    );
+
+    private final Setting<Integer> boneMealRestockAt = sgPlanting.add(new IntSetting.Builder()
+        .name("bone-meal-restock-at")
+        .description("Restock when you're down to this much bone meal or less, and there are crops waiting to be grown.")
+        .defaultValue(4)
+        .range(0, 256)
+        .sliderRange(0, 64)
+        .visible(() -> (autoPlant.get() && boneMeal.get()) && boneMealRestock.get())
+        .build()
+    );
+
+    // The bone-meal storages are listed in the module's GUI, this only holds them for saving
+    private final Setting<List<String>> boneMealStorageData = sgPlanting.add(new StringListSetting.Builder()
+        .name("bone-meal-storages")
+        .description("The containers to take bone meal from, managed with pick-bone-meal-storage and the list below the settings.")
+        .visible(() -> false)
+        .build()
+    );
+
+    private final Setting<Boolean> pickBoneMealStorage = sgPlanting.add(new BoolSetting.Builder()
+        .name("pick-bone-meal-storage")
+        .description("Turn on, then right-click a container to add it to the bone-meal storages, or to remove it if it's already one. Turns itself off after one click. Works while the module is off.")
+        .defaultValue(false)
+        .onChanged(on -> {
+            if (on) this.onlyPick(this.pickBoneMealStorage);
+        })
+        .visible(() -> this.boneMealSupply.usingStorage())
         .build()
     );
 
@@ -210,8 +270,25 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     private final Setting<Boolean> autoWater = sgWater.add(new BoolSetting.Builder()
         .name("auto-water")
-        .description("Digs a hole and fills it with a water bucket when tillable blocks have no water nearby. Dry blocks wait to be tilled until they're watered.")
+        .description("Digs a hole and fills it with water (from a bucket, or with ice, see water-source) when tillable blocks have no water nearby. Dry blocks wait to be tilled until they're watered.")
         .defaultValue(true)
+        .onChanged(on -> this.cancelIce())
+        .build()
+    );
+
+    private final Setting<WaterSource> waterSource = sgWater.add(new EnumSetting.Builder<WaterSource>()
+        .name("water-source")
+        .description("What fills the holes. Bucket: pours a water bucket. Ice: places an ice block in the hole and breaks it, which turns it into water (needs a solid block under the hole, and doesn't work in the Nether or in creative).")
+        .defaultValue(WaterSource.Bucket)
+        .onChanged(source -> {
+            this.warnedNoBucket = false;
+            this.warnedIceProblem = false;
+            this.iceBroken = false;
+            this.iceFailures = 0;
+            this.iceProblemTick = -1;
+            this.cancelIce();
+        })
+        .visible(autoWater::get)
         .build()
     );
 
@@ -239,6 +316,186 @@ public class AutoTill extends Module implements Restocker.Owner {
         .build()
     );
 
+    private final Setting<Boolean> lightHoles = sgWater.add(new BoolSetting.Builder()
+        .name("light-holes")
+        .description("Puts a glowstone block directly above each water hole this module fills, so the field is lit. Farmland is still watered. Glowstone comes from your inventory and goes on after the water is in, against a solid block next to the spot above the hole when there is one, otherwise by air placing (see light-air-place).")
+        .defaultValue(false)
+        .visible(autoWater::get)
+        .build()
+    );
+
+    private final Setting<Boolean> lightAirPlace = sgWater.add(new BoolSetting.Builder()
+        .name("light-air-place")
+        .description("Places the glowstone by clicking the empty spot above the hole when no block is next to it. Turn off on servers that reject or flag air placing, then only holes with a block to place against are lit.")
+        .defaultValue(true)
+        .visible(() -> autoWater.get() && lightHoles.get())
+        .build()
+    );
+
+    private final Setting<Boolean> glowstoneRestock = sgWater.add(new BoolSetting.Builder()
+        .name("glowstone-restock")
+        .description("Restocks glowstone when you run low.")
+        .defaultValue(false)
+        .visible(() -> autoWater.get() && lightHoles.get())
+        .build()
+    );
+
+    private final Setting<RestockMode> glowstoneRestockMode = sgWater.add(new EnumSetting.Builder<RestockMode>()
+        .name("glowstone-restock-mode")
+        .description("Storage: take glowstone from a container you pick. Ender Chest: place your ender chest, take glowstone from a shulker inside, put everything back and pick the ender chest up with a silk touch pickaxe.")
+        .defaultValue(RestockMode.Storage)
+        .onChanged(mode -> this.glowstoneSupply.unavailable = false)
+        .visible(() -> (autoWater.get() && lightHoles.get()) && glowstoneRestock.get())
+        .build()
+    );
+
+    private final Setting<Integer> glowstoneRestockAt = sgWater.add(new IntSetting.Builder()
+        .name("glowstone-restock-at")
+        .description("Restock when you're down to this much glowstone or less, and there are holes waiting to be lit.")
+        .defaultValue(1)
+        .range(0, 256)
+        .sliderRange(0, 64)
+        .visible(() -> (autoWater.get() && lightHoles.get()) && glowstoneRestock.get())
+        .build()
+    );
+
+    // The glowstone storages are listed in the module's GUI, this only holds them for saving
+    private final Setting<List<String>> glowstoneStorageData = sgWater.add(new StringListSetting.Builder()
+        .name("glowstone-storages")
+        .description("The containers to take glowstone from, managed with pick-glowstone-storage and the list below the settings.")
+        .visible(() -> false)
+        .build()
+    );
+
+    private final Setting<Boolean> pickGlowstoneStorage = sgWater.add(new BoolSetting.Builder()
+        .name("pick-glowstone-storage")
+        .description("Turn on, then right-click a container to add it to the glowstone storages, or to remove it if it's already one. Turns itself off after one click. Works while the module is off.")
+        .defaultValue(false)
+        .onChanged(on -> {
+            if (on) this.onlyPick(this.pickGlowstoneStorage);
+        })
+        .visible(() -> this.glowstoneSupply.usingStorage())
+        .build()
+    );
+
+    // Ice
+
+    private final Setting<Boolean> iceRestock = sgIce.add(new BoolSetting.Builder()
+        .name("ice-restock")
+        .description("Restocks ice when you run low.")
+        .defaultValue(false)
+        .visible(this::iceMode)
+        .build()
+    );
+
+    private final Setting<RestockMode> iceRestockMode = sgIce.add(new EnumSetting.Builder<RestockMode>()
+        .name("ice-restock-mode")
+        .description("Storage: take ice from a container you pick. Ender Chest: place your ender chest, take ice from a shulker inside, put everything back and pick the ender chest up with a silk touch pickaxe.")
+        .defaultValue(RestockMode.Storage)
+        .onChanged(mode -> this.iceSupply.unavailable = false)
+        .visible(() -> iceMode() && iceRestock.get())
+        .build()
+    );
+
+    private final Setting<Integer> iceRestockAt = sgIce.add(new IntSetting.Builder()
+        .name("ice-restock-at")
+        .description("Restock when you're down to this much ice or less, and there are dry blocks waiting for water.")
+        .defaultValue(2)
+        .range(0, 256)
+        .sliderRange(0, 64)
+        .visible(() -> iceMode() && iceRestock.get())
+        .build()
+    );
+
+    // The ice storages are listed in the module's GUI, this only holds them for saving
+    private final Setting<List<String>> iceStorageData = sgIce.add(new StringListSetting.Builder()
+        .name("ice-storages")
+        .description("The containers to take ice from, managed with pick-ice-storage and the list below the settings.")
+        .visible(() -> false)
+        .build()
+    );
+
+    private final Setting<Boolean> pickIceStorage = sgIce.add(new BoolSetting.Builder()
+        .name("pick-ice-storage")
+        .description("Turn on, then right-click a container to add it to the ice storages, or to remove it if it's already one. Turns itself off after one click. Works while the module is off.")
+        .defaultValue(false)
+        .onChanged(on -> {
+            if (on) this.onlyPick(this.pickIceStorage);
+        })
+        .visible(this::usingIceStorage)
+        .build()
+    );
+
+    // Hotbar
+
+    private final Setting<Boolean> autoHotbar = sgHotbar.add(new BoolSetting.Builder()
+        .name("auto-hotbar")
+        .description("Keeps the hoe and the items you need in your hotbar: pulls them out of your inventory when they're missing from it, and tops up seeds, bone meal, ice and glowstone when the hotbar stack runs low. Never drops anything, and never moves anything while a screen is open. When off, an item is only pulled into an empty hotbar slot when it's needed and missing.")
+        .defaultValue(true)
+        .visible(autoSwitch::get)
+        .build()
+    );
+
+    private final Setting<Integer> hoeSlot = sgHotbar.add(new IntSetting.Builder()
+        .name("hoe-slot")
+        .description("The hotbar slot (1-9) to keep the hoe in. 0 uses any free slot.")
+        .defaultValue(0)
+        .range(0, 9)
+        .sliderRange(0, 9)
+        .visible(() -> autoHotbar.get() && autoSwitch.get())
+        .build()
+    );
+
+    private final Setting<Integer> seedSlot = sgHotbar.add(new IntSetting.Builder()
+        .name("seed-slot")
+        .description("The hotbar slot (1-9) to keep the seeds in. 0 uses any free slot.")
+        .defaultValue(0)
+        .range(0, 9)
+        .sliderRange(0, 9)
+        .visible(() -> autoHotbar.get() && autoSwitch.get() && autoPlant.get())
+        .build()
+    );
+
+    private final Setting<Integer> boneMealSlot = sgHotbar.add(new IntSetting.Builder()
+        .name("bone-meal-slot")
+        .description("The hotbar slot (1-9) to keep the bone meal in. 0 uses any free slot.")
+        .defaultValue(0)
+        .range(0, 9)
+        .sliderRange(0, 9)
+        .visible(() -> autoHotbar.get() && autoSwitch.get() && autoPlant.get() && boneMeal.get())
+        .build()
+    );
+
+    private final Setting<Integer> bucketSlot = sgHotbar.add(new IntSetting.Builder()
+        .name("water-bucket-slot")
+        .description("The hotbar slot (1-9) to keep the water bucket in. 0 uses any free slot.")
+        .defaultValue(0)
+        .range(0, 9)
+        .sliderRange(0, 9)
+        .visible(() -> autoHotbar.get() && autoSwitch.get() && autoWater.get() && !iceMode())
+        .build()
+    );
+
+    private final Setting<Integer> iceSlot = sgHotbar.add(new IntSetting.Builder()
+        .name("ice-slot")
+        .description("The hotbar slot (1-9) to keep the ice in. 0 uses any free slot.")
+        .defaultValue(0)
+        .range(0, 9)
+        .sliderRange(0, 9)
+        .visible(() -> autoHotbar.get() && autoSwitch.get() && iceMode())
+        .build()
+    );
+
+    private final Setting<Integer> glowstoneSlot = sgHotbar.add(new IntSetting.Builder()
+        .name("glowstone-slot")
+        .description("The hotbar slot (1-9) to keep the glowstone in. 0 uses any free slot.")
+        .defaultValue(0)
+        .range(0, 9)
+        .sliderRange(0, 9)
+        .visible(() -> autoHotbar.get() && autoSwitch.get() && autoWater.get() && lightHoles.get())
+        .build()
+    );
+
     // Automation
 
     private final Setting<Boolean> autoWalk = sgAutomation.add(new BoolSetting.Builder()
@@ -252,7 +509,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         .name("refill-water")
         .description("Uses Baritone to refill empty buckets at the nearest 4x4 infinite water source, then walks back.")
         .defaultValue(true)
-        .visible(autoWalk::get)
+        .visible(() -> autoWalk.get() && !iceMode())
         .build()
     );
 
@@ -261,7 +518,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         .description("Where to refill buckets: the nearest 4x4 water source, or a station you choose.")
         .defaultValue(RefillSource.NearestPool)
         .onChanged(source -> refillUnavailable = false)
-        .visible(() -> autoWalk.get() && refillWater.get())
+        .visible(() -> autoWalk.get() && !iceMode() && refillWater.get())
         .build()
     );
 
@@ -278,6 +535,9 @@ public class AutoTill extends Module implements Restocker.Owner {
         .name("pick-station")
         .description("Turn on, then right-click a water block to set it as the station. Works while the module is off.")
         .defaultValue(false)
+        .onChanged(on -> {
+            if (on) this.supplies.forEach(supply -> supply.pick.set(false));
+        })
         .visible(this::usingStation)
         .build()
     );
@@ -288,7 +548,36 @@ public class AutoTill extends Module implements Restocker.Owner {
         .defaultValue(96)
         .range(16, 256)
         .sliderRange(16, 192)
-        .visible(() -> autoWalk.get() && refillWater.get() && refillSource.get() == RefillSource.NearestPool)
+        .visible(() -> autoWalk.get() && !iceMode() && refillWater.get() && refillSource.get() == RefillSource.NearestPool)
+        .build()
+    );
+
+    private final Setting<WorkPattern> workPattern = sgAutomation.add(new EnumSetting.Builder<WorkPattern>()
+        .name("work-pattern")
+        .description("How to pick the next land to till when nothing is left in reach. Nearest: always the closest uncovered spot. Rows: sweeps back and forth along parallel lanes, like mowing a lawn. Spiral Out: rings from where you enabled it outwards. Spiral In: the outer ring first, working towards the middle.")
+        .defaultValue(WorkPattern.Nearest)
+        .onChanged(pattern -> resetSweep())
+        .visible(autoWalk::get)
+        .build()
+    );
+
+    private final Setting<RowDirection> rowDirection = sgAutomation.add(new EnumSetting.Builder<RowDirection>()
+        .name("row-direction")
+        .description("Which way the lanes run. Auto runs them the way you were facing when you enabled the module.")
+        .defaultValue(RowDirection.Auto)
+        .onChanged(direction -> resetSweep())
+        .visible(() -> autoWalk.get() && workPattern.get() == WorkPattern.Rows)
+        .build()
+    );
+
+    private final Setting<Integer> laneWidth = sgAutomation.add(new IntSetting.Builder()
+        .name("lane-width")
+        .description("How wide each lane or ring is in blocks. 0 works it out from your reach, so one pass covers everything you can reach.")
+        .defaultValue(0)
+        .range(0, 32)
+        .sliderRange(0, 16)
+        .onChanged(width -> resetSweep())
+        .visible(() -> autoWalk.get() && (workPattern.get() == WorkPattern.Rows || workPattern.get() == WorkPattern.SpiralOut || workPattern.get() == WorkPattern.SpiralIn))
         .build()
     );
 
@@ -314,7 +603,7 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     private final Setting<Boolean> combineTrips = sgAutomation.add(new BoolSetting.Builder()
         .name("combine-trips")
-        .description("Restocks seeds on the way back from refilling water, and refills empty buckets on the way back from restocking seeds.")
+        .description("Restocks seeds, ice, bone meal and glowstone on the way back from refilling water or from each other, and refills empty buckets on the way back from restocking.")
         .defaultValue(true)
         .visible(autoWalk::get)
         .build()
@@ -327,6 +616,36 @@ public class AutoTill extends Module implements Restocker.Owner {
         .range(1, 2304)
         .sliderRange(1, 576)
         .visible(() -> autoWalk.get() && combineTrips.get() && autoPlant.get() && seedRestock.get())
+        .build()
+    );
+
+    private final Setting<Integer> iceTopUpAt = sgAutomation.add(new IntSetting.Builder()
+        .name("ice-top-up-at")
+        .description("When combining trips, restocks ice on another trip if you have fewer than this much.")
+        .defaultValue(64)
+        .range(1, 2304)
+        .sliderRange(1, 576)
+        .visible(() -> autoWalk.get() && combineTrips.get() && iceMode() && iceRestock.get())
+        .build()
+    );
+
+    private final Setting<Integer> boneMealTopUpAt = sgAutomation.add(new IntSetting.Builder()
+        .name("bone-meal-top-up-at")
+        .description("When combining trips, restocks bone meal on another trip if you have fewer than this much.")
+        .defaultValue(64)
+        .range(1, 2304)
+        .sliderRange(1, 576)
+        .visible(() -> autoWalk.get() && combineTrips.get() && autoPlant.get() && boneMeal.get() && boneMealRestock.get())
+        .build()
+    );
+
+    private final Setting<Integer> glowstoneTopUpAt = sgAutomation.add(new IntSetting.Builder()
+        .name("glowstone-top-up-at")
+        .description("When combining trips, restocks glowstone on another trip if you have fewer than this much.")
+        .defaultValue(32)
+        .range(1, 2304)
+        .sliderRange(1, 576)
+        .visible(() -> autoWalk.get() && combineTrips.get() && autoWater.get() && lightHoles.get() && glowstoneRestock.get())
         .build()
     );
 
@@ -351,8 +670,63 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     private final Setting<Boolean> disableWhenOut = sgSafety.add(new BoolSetting.Builder()
         .name("disable-when-out")
-        .description("Disables the module when no usable hoe is available.")
+        .description("Disables the module when no usable hoe is available. With hoe-restock on, it restocks first and only disables if that fails.")
         .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Boolean> hoeRestock = sgSafety.add(new BoolSetting.Builder()
+        .name("hoe-restock")
+        .description("Restocks hoes when you run low.")
+        .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<RestockMode> hoeRestockMode = sgSafety.add(new EnumSetting.Builder<RestockMode>()
+        .name("hoe-restock-mode")
+        .description("Storage: take hoes from a container you pick. Ender Chest: place your ender chest, take hoes from a shulker inside, put everything back and pick the ender chest up with a silk touch pickaxe.")
+        .defaultValue(RestockMode.Storage)
+        .onChanged(mode -> this.hoeSupply.unavailable = false)
+        .visible(hoeRestock::get)
+        .build()
+    );
+
+    private final Setting<Integer> hoeRestockAt = sgSafety.add(new IntSetting.Builder()
+        .name("hoe-restock-at")
+        .description("Restock when you're down to this many usable hoes or fewer, and there's land waiting to be tilled. 0 restocks once you have none left.")
+        .defaultValue(0)
+        .range(0, 36)
+        .sliderRange(0, 9)
+        .visible(hoeRestock::get)
+        .build()
+    );
+
+    private final Setting<Integer> hoeRestockAmount = sgSafety.add(new IntSetting.Builder()
+        .name("hoe-restock-amount")
+        .description("How many hoes to take from each storage visited, the ones with the most uses left first. Hoes that are about to break don't count.")
+        .defaultValue(2)
+        .range(1, 9)
+        .sliderRange(1, 9)
+        .visible(hoeRestock::get)
+        .build()
+    );
+
+    // The hoe storages are listed in the module's GUI, this only holds them for saving
+    private final Setting<List<String>> hoeStorageData = sgSafety.add(new StringListSetting.Builder()
+        .name("hoe-storages")
+        .description("The containers to take hoes from, managed with pick-hoe-storage and the list below the settings.")
+        .visible(() -> false)
+        .build()
+    );
+
+    private final Setting<Boolean> pickHoeStorage = sgSafety.add(new BoolSetting.Builder()
+        .name("pick-hoe-storage")
+        .description("Turn on, then right-click a container to add it to the hoe storages, or to remove it if it's already one. Turns itself off after one click. Works while the module is off.")
+        .defaultValue(false)
+        .onChanged(on -> {
+            if (on) this.onlyPick(this.pickHoeStorage);
+        })
+        .visible(() -> this.hoeSupply.usingStorage())
         .build()
     );
 
@@ -448,13 +822,149 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     private static final int RESTOCK_RETRY_TICKS = 20 * 60;
 
-    private final Restocker restocker = new Restocker(this, this::isSeed, "seeds");
-    private final StorageList storages = new StorageList(storageData, () -> restockUnavailable = false);
-    private boolean restockUnavailable;
-    private int restockRetryTicks;
+    /**
+     * Something the module restocks: its settings, the storages to take it from and what went wrong with them lately.
+     * Seeds and ice each have one, so their storages are independent.
+     */
+    private final class Supply {
+        final String noun;
+        final String items;
+        final Predicate<ItemStack> is;
+        final BooleanSupplier active;
+        final Setting<Boolean> enabled;
+        final Setting<RestockMode> mode;
+        final Setting<Integer> at;
+        final Setting<Boolean> pick;
+        final Restocker restocker;
+        final StorageList storages;
+        boolean unavailable;
+        int retryTicks;
+        // Already been out for this on the trip, so a combined trip doesn't go round in circles
+        boolean thisTrip;
+
+        Supply(String noun, String items, Predicate<ItemStack> is, BooleanSupplier active, Setting<Boolean> enabled,
+               Setting<RestockMode> mode, Setting<Integer> at, Setting<Boolean> pick, Setting<List<String>> data) {
+            this.noun = noun;
+            this.items = items;
+            this.is = is;
+            this.active = active;
+            this.enabled = enabled;
+            this.mode = mode;
+            this.at = at;
+            this.pick = pick;
+            this.restocker = new Restocker(AutoTill.this, is, items);
+            this.storages = new StorageList(data, () -> unavailable = false);
+        }
+
+        int count() {
+            return InvUtils.find(is).count();
+        }
+
+        boolean usingStorage() {
+            return active.getAsBoolean() && mode.get() == RestockMode.Storage;
+        }
+
+        /**
+         * A failed restock only pauses restocking, it's tried again after a while.
+         */
+        void tick() {
+            storages.tick();
+            if (unavailable && retryTicks > 0 && --retryTicks == 0) unavailable = false;
+        }
+
+        void reset() {
+            unavailable = false;
+            retryTicks = 0;
+            thisTrip = false;
+            storages.resetSession();
+        }
+    }
+
+    private final Supply seedSupply = new Supply("seed", "seeds", this::isSeed, () -> autoPlant.get() && seedRestock.get(),
+        seedRestock, restockMode, restockAt, pickStorage, storageData);
+    private final Supply iceSupply = new Supply("ice", "ice", this::isIce, () -> iceMode() && iceRestock.get(),
+        iceRestock, iceRestockMode, iceRestockAt, pickIceStorage, iceStorageData);
+    private final Supply boneMealSupply = new Supply("bone meal", "bone meal", stack -> stack.is(Items.BONE_MEAL), () -> autoPlant.get() && boneMeal.get() && boneMealRestock.get(),
+        boneMealRestock, boneMealRestockMode, boneMealRestockAt, pickBoneMealStorage, boneMealStorageData);
+    private final Supply glowstoneSupply = new Supply("glowstone", "glowstone", this::isGlowstone, () -> autoWater.get() && lightHoles.get() && glowstoneRestock.get(),
+        glowstoneRestock, glowstoneRestockMode, glowstoneRestockAt, pickGlowstoneStorage, glowstoneStorageData);
+    private final Supply hoeSupply = new Supply("hoe", "hoes", this::isUsableHoe, hoeRestock::get,
+        hoeRestock, hoeRestockMode, hoeRestockAt, pickHoeStorage, hoeStorageData);
+    private final List<Supply> supplies = List.of(seedSupply, iceSupply, boneMealSupply, glowstoneSupply, hoeSupply);
+
+    private final AutoHotbar.Need hoeNeed = new AutoHotbar.Need("hoe", this::isUsableHoe, hoeSlot::get, false, () -> true);
+    private final AutoHotbar.Need seedNeed = new AutoHotbar.Need("seeds", this::isSeed, seedSlot::get, true, autoPlant::get);
+    private final AutoHotbar.Need boneMealNeed = new AutoHotbar.Need("bone meal", stack -> stack.is(Items.BONE_MEAL), boneMealSlot::get, true, () -> autoPlant.get() && boneMeal.get());
+    // The empty bucket a water bucket turns into may be swapped out of its slot for the next one
+    private final AutoHotbar.Need bucketNeed = new AutoHotbar.Need("water bucket", stack -> stack.is(Items.WATER_BUCKET), bucketSlot::get, false, () -> autoWater.get() && !iceMode())
+        .sharing(stack -> stack.is(Items.BUCKET));
+    private final AutoHotbar.Need iceNeed = new AutoHotbar.Need("ice", this::isIce, iceSlot::get, true, this::iceMode);
+    private final AutoHotbar.Need glowstoneNeed = new AutoHotbar.Need("glowstone", this::isGlowstone, glowstoneSlot::get, true, () -> autoWater.get() && lightHoles.get());
+    // Not kept in the hotbar between uses, only pulled in when the pool needs filling, into the water bucket's slot
+    private final AutoHotbar.Need emptyBucketNeed = new AutoHotbar.Need("bucket", stack -> stack.is(Items.BUCKET), bucketSlot::get, false, () -> autoWater.get() && !iceMode());
+    // Tools it digs and breaks ice with are never swapped out of the way. Worn out hoes aren't kept, only the usable
+    // ones, and those are a need.
+    private final AutoHotbar hotbar = new AutoHotbar(() -> autoHotbar.get() && autoSwitch.get(),
+        stack -> stack.is(ItemTags.SHOVELS) || stack.is(ItemTags.PICKAXES) || stack.is(Items.BUCKET) || stack.is(Items.WATER_BUCKET),
+        message -> warning("%s", message), message -> info("%s", message),
+        List.of(hoeNeed, seedNeed, boneMealNeed, bucketNeed, iceNeed, glowstoneNeed));
+    // Which one the restock that's running is for
+    private Supply restocking = seedSupply;
 
     // What this trip has already been out for, so a combined trip doesn't go round in circles
-    private boolean seedsThisTrip, waterThisTrip;
+    private boolean waterThisTrip;
+
+    // Filling holes with ice
+    private enum IceStage { Place, Break, Verify }
+
+    private static final int ICE_STAGE_TICKS = 20 * 5;
+    // The water shows up in the tick the ice breaks, but the update can lag behind
+    private static final int ICE_VERIFY_TICKS = 20;
+    private static final int ICE_JOB_TICKS = 20 * 30;
+    private static final int ICE_MAX_TRIES = 5;
+    // Ice that broke without leaving water this many times in a row isn't going to work here
+    private static final int ICE_MAX_FAILURES = 3;
+    private static final int LIGHT_MAX_AGE = 120;
+    private static final int LIGHT_MAX_TRIES = 12;
+
+    private BlockPos iceHole;
+    private IceStage iceStage;
+    private int iceStageTicks;
+    private int iceCooldown;
+    private int iceTries;
+    private int iceJobTicks;
+    private int iceFailures;
+    private boolean iceBroken;
+    private boolean warnedIceProblem;
+    private boolean iceBreakRetried;
+    // iceProblem() looks through the hotbar, so it's worked out once a tick
+    private int tickCount;
+    private int iceProblemTick = -1;
+    private String iceProblemCache;
+
+    // Holes that got water and are waiting for their glowstone, and how long they've been waiting
+    private final Map<BlockPos, Integer> lightQueue = new HashMap<>();
+    // Tries that went nowhere per hole: placements that didn't land, or no way to place at all
+    private final Map<BlockPos, Integer> lightTries = new HashMap<>();
+    private int lightCooldown;
+    private boolean warnedNoGlowstone;
+    private boolean warnedNoSupport;
+
+    public enum WaterSource {
+        Bucket("Bucket"),
+        Ice("Ice");
+
+        private final String title;
+
+        WaterSource(String title) {
+            this.title = title;
+        }
+
+        @Override
+        public String toString() {
+            return title;
+        }
+    }
 
     public enum RefillSource {
         NearestPool("Nearest Pool"),
@@ -496,6 +1006,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     private State state = State.Working;
     private boolean usedBaritone;
     private BlockPos home;
+    private final WorkPattern.Sweep sweep = new WorkPattern.Sweep();
     private int stateTicks;
     private int actionCooldown;
     private int exploreCooldown;
@@ -517,6 +1028,8 @@ public class AutoTill extends Module implements Restocker.Owner {
     private int refillRetryTicks;
     private List<BlockPos> pool;
     private BlockPos poolCorner;
+    // Whether the refill trip that's running is going to the station rather than a pool
+    private boolean tripStation;
     private BlockPos knownPoolCorner;
     private BlockPos tap;
     private BlockPos lastScooped;
@@ -533,6 +1046,9 @@ public class AutoTill extends Module implements Restocker.Owner {
     public AutoTill() {
         super(QwerteAddon.CATEGORY, "auto-till", "Uses a hoe to turn nearby dirt and grass into farmland.");
 
+        // Only a few hoes are taken per restock, the ones with the most uses left
+        hoeSupply.restocker.limit(hoeRestockAmount::get, stack -> stack.getMaxDamage() - stack.getDamageValue());
+
         // Always listening so the station and storage can be picked while the module is off
         BlockPicker picker = new BlockPicker();
         RightClick.listen(picker::onRightClick);
@@ -543,13 +1059,21 @@ public class AutoTill extends Module implements Restocker.Owner {
          * @return true when picking, so the click doesn't place, use or open anything
          */
         private boolean onRightClick() {
-            if (!pickStation.get() && !pickStorage.get()) return false;
+            // Hidden pick flags don't count, or they'd swallow right-clicks with nothing to show for it
+            Supply picking = null;
+            for (Supply supply : supplies) {
+                if (supply.pick.get() && supply.usingStorage()) {
+                    picking = supply;
+                    break;
+                }
+            }
+            if (!pickStation.get() && picking == null) return false;
 
             // The mouse is only grabbed in game, never while a screen is open
             if (mc.player == null || mc.level == null || !mc.mouseHandler.isMouseGrabbed()) return false;
 
             if (pickStation.get()) pickStation();
-            else pickStorage();
+            else pickStorage(picking);
             return true;
         }
 
@@ -570,7 +1094,7 @@ public class AutoTill extends Module implements Restocker.Owner {
             info("Refill station set to %s.", station.get().toShortString());
         }
 
-        private void pickStorage() {
+        private void pickStorage(Supply supply) {
             Vec3 eyes = mc.player.getEyePosition();
             Vec3 end = eyes.add(mc.player.getViewVector(1f).scale(64));
             BlockHitResult hit = mc.level.clip(new ClipContext(eyes, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
@@ -580,30 +1104,38 @@ public class AutoTill extends Module implements Restocker.Owner {
                 return;
             }
 
-            storages.migrate(legacyStorage);
+            if (supply == seedSupply) supply.storages.migrate(legacyStorage);
             BlockPos pos = hit.getBlockPos().immutable();
-            boolean added = storages.toggle(pos);
-            pickStorage.set(false);
-            info("%s storage at %s (%d storages).", added ? "Added" : "Removed", pos.toShortString(), storages.size());
+            boolean added = supply.storages.toggle(pos);
+            supply.pick.set(false);
+            info("%s %s storage at %s (%d storages).", added ? "Added" : "Removed", supply.noun, pos.toShortString(), supply.storages.size());
         }
     }
 
     @Override
     public Module fromTag(CompoundTag tag) {
         Module module = super.fromTag(tag);
-        storages.migrate(legacyStorage);
+        seedSupply.storages.migrate(legacyStorage);
         return module;
     }
 
     @Override
     public WWidget getWidget(GuiTheme theme) {
-        storages.migrate(legacyStorage);
-        return storages.widget(theme, "Seed storages", this::usingStorage);
+        seedSupply.storages.migrate(legacyStorage);
+
+        WVerticalList list = theme.verticalList();
+        list.add(seedSupply.storages.widget(theme, "Seed storages", "pick-storage", seedSupply::usingStorage)).expandX();
+        list.add(iceSupply.storages.widget(theme, "Ice storages", "pick-ice-storage", iceSupply::usingStorage)).expandX();
+        list.add(boneMealSupply.storages.widget(theme, "Bone meal storages", "pick-bone-meal-storage", boneMealSupply::usingStorage)).expandX();
+        list.add(glowstoneSupply.storages.widget(theme, "Glowstone storages", "pick-glowstone-storage", glowstoneSupply::usingStorage)).expandX();
+        list.add(hoeSupply.storages.widget(theme, "Hoe storages", "pick-hoe-storage", hoeSupply::usingStorage)).expandX();
+        return list;
     }
 
     @Override
     public void onActivate() {
         timer = 0;
+        hotbar.reset();
         waterCooldown = 0;
         warnedNoBucket = false;
         targets.clear();
@@ -614,6 +1146,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         hoeMissingTicks = 0;
         warnedHoldHoe = false;
         home = mc.player != null ? mc.player.blockPosition() : null;
+        resetSweep();
         pathTarget = null;
         returnPos = null;
         pool = null;
@@ -623,10 +1156,21 @@ public class AutoTill extends Module implements Restocker.Owner {
         exploreCooldown = 0;
         refillUnavailable = false;
         refillRetryTicks = 0;
-        restockUnavailable = false;
-        restockRetryTicks = 0;
-        storages.migrate(legacyStorage);
-        storages.resetSession();
+        seedSupply.storages.migrate(legacyStorage);
+        for (Supply supply : supplies) supply.reset();
+        restocking = seedSupply;
+        waterThisTrip = false;
+        iceHole = null;
+        iceStage = null;
+        iceCooldown = 0;
+        iceFailures = 0;
+        iceBroken = false;
+        warnedIceProblem = false;
+        lightQueue.clear();
+        lightTries.clear();
+        lightCooldown = 0;
+        warnedNoGlowstone = false;
+        warnedNoSupport = false;
         noAimTicks = 0;
         approachedSpot = null;
         unreachable.clear();
@@ -649,7 +1193,8 @@ public class AutoTill extends Module implements Restocker.Owner {
     @Override
     public void onDeactivate() {
         abandonWaterSpot();
-        if (state == State.Restocking) restocker.cancel();
+        cancelIce();
+        if (state == State.Restocking) restocking.restocker.cancel();
 
         // Only touch Baritone if we actually drove it this session
         if (usedBaritone) {
@@ -664,7 +1209,7 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     @EventHandler
     private void onGameLeft(GameLeftEvent event) {
-        if (state == State.Restocking) restocker.cancel();
+        if (state == State.Restocking) restocking.restocker.cancel();
 
         if (usedBaritone) {
             BaritoneHelper.stop();
@@ -686,7 +1231,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         dryTargets.clear();
         plantTargets.clear();
         boneTargets.clear();
-        storages.tick();
+        for (Supply supply : supplies) supply.tick();
 
         // onActivate can run before the player exists
         if (home == null) home = mc.player.blockPosition();
@@ -698,7 +1243,25 @@ public class AutoTill extends Module implements Restocker.Owner {
 
         // A failed refill only pauses refilling, try again after a while
         if (refillUnavailable && refillRetryTicks > 0 && --refillRetryTicks == 0) refillUnavailable = false;
-        if (restockUnavailable && restockRetryTicks > 0 && --restockRetryTicks == 0) restockUnavailable = false;
+
+        tickCount++;
+        warnAboutIce();
+
+        // Keep the hotbar stocked. A move takes the tick, and it waits while a hole is being dug or filled with ice
+        // or a tool swapped in for digging is still out.
+        // A swapped-in digging tool outside of any dig would otherwise hold the hotbar still for good
+        if (digSwapped && waterSpot == null && iceHole == null && !mc.gameMode.isDestroying()) finishDigging();
+
+        if (state != State.Restocking && iceHole == null && !digSwapped && !mc.gameMode.isDestroying() && hotbar.tick()) return;
+
+        // A pick flag that got hidden would otherwise stay on and be waiting for a click that never comes
+        for (Supply supply : supplies) {
+            if (supply.pick.get() && !supply.usingStorage()) supply.pick.set(false);
+        }
+
+        // A hole being filled with ice takes the whole tick, wherever we are, until it's watered
+        if (iceHole != null && state != State.Approaching && state != State.Filling && state != State.Restocking
+            && driveIce(mc.player.getEyePosition())) return;
 
         // Fill any open hole we're passing, walking or not. Only skipped while filling buckets or restocking, those
         // need the hands and the view to themselves.
@@ -715,10 +1278,10 @@ public class AutoTill extends Module implements Restocker.Owner {
         int r = (int) Math.ceil(reach.get());
         BlockPos center = mc.player.blockPosition();
 
-        // Dry blocks are held back for watering only while there's a bucket to water them with, or one we can go fill
-        moveToHotbar(Items.WATER_BUCKET);
-        boolean hasWater = hasItem(Items.WATER_BUCKET);
-        boolean holdDry = autoWater.get() && (hasWater || canRefill());
+        // Dry blocks are held back for watering only while there's a bucket or ice to water them with, or a way to get more
+        moveToHotbar(waterNeed());
+        boolean hasWater = hasWaterSupply();
+        boolean holdDry = autoWater.get() && (hasWater || canRefill() || canRestockIce());
 
         for (BlockPos pos : BlockPos.betweenClosed(center.offset(-r, -r - 1, -r), center.offset(r, r, r))) {
             if (eyes.distanceToSqr(Vec3.atCenterOf(pos)) > reachSq) continue;
@@ -740,12 +1303,27 @@ public class AutoTill extends Module implements Restocker.Owner {
 
         // Low on seeds comes first: no point tilling land we have nothing to plant on. Leave a hole half dug
         // rather than mid-swing though, it's picked back up afterwards.
-        if (autoPlant.get() && seedRestock.get() && !restockUnavailable && InvUtils.find(this::isSeed).count() <= restockAt.get()) {
+        if (seedSupply.active.getAsBoolean() && !seedSupply.unavailable && seedSupply.count() <= restockAt.get()) {
             if (waterSpot != null && mc.gameMode.isDestroying()) mc.gameMode.stopDestroyBlock();
             finishDigging();
-            startRestock();
+            startRestock(seedSupply);
             return;
         }
+
+        // Low on ice only matters while there's something waiting for water
+        if (canRestockIce() && iceSupply.count() <= iceRestockAt.get() && (!dryTargets.isEmpty() || waterSpot != null)) {
+            if (waterSpot != null && mc.gameMode.isDestroying()) mc.gameMode.stopDestroyBlock();
+            finishDigging();
+            startRestock(iceSupply);
+            return;
+        }
+
+        // Low on bone meal, glowstone or hoes only matters while there's something to use them on
+        if (restockIfLow(boneMealSupply, !boneTargets.isEmpty())) return;
+        if (restockIfLow(glowstoneSupply, glowstoneSupply.active.getAsBoolean() && hasLightableHole(eyes))) return;
+        if (restockIfLow(hoeSupply, !targets.isEmpty())) return;
+
+        if (lightHoles.get() && tickLight(eyes)) return;
 
         noWaterSpot = false;
         if (autoWater.get() && handleWater(eyes)) return;
@@ -757,13 +1335,19 @@ public class AutoTill extends Module implements Restocker.Owner {
         }
 
         Comparator<BlockPos> nearestFirst = Comparator.comparingDouble(pos -> eyes.distanceToSqr(Vec3.atCenterOf(pos)));
+
+        // With a work pattern the strip in reach is finished in the sweep's order, the nearest only breaks ties
+        if (walking() && workPattern.get() != WorkPattern.Nearest) {
+            prepareSweep();
+            nearestFirst = Comparator.comparingLong((BlockPos pos) -> sweep.key(pos.getX(), pos.getZ(), Long.MAX_VALUE)).thenComparing(nearestFirst);
+        }
         targets.sort(nearestFirst);
         plantTargets.sort(nearestFirst);
         boneTargets.sort(nearestFirst);
 
         // Planting and bone meal only count as work while we have the items for them
-        if (!plantTargets.isEmpty()) moveToHotbar(this::isSeed);
-        if (!boneTargets.isEmpty()) moveToHotbar(Items.BONE_MEAL);
+        if (!plantTargets.isEmpty()) moveToHotbar(seedNeed);
+        if (!boneTargets.isEmpty()) moveToHotbar(boneMealNeed);
         boolean canPlant = !plantTargets.isEmpty() && findItem(this::isSeed).found();
         boolean canBoneMeal = !boneTargets.isEmpty() && findItem(stack -> stack.is(Items.BONE_MEAL)).found();
 
@@ -778,7 +1362,7 @@ public class AutoTill extends Module implements Restocker.Owner {
             }
 
             // A hole we can't fill shouldn't keep us here forever
-            if (waterSpot != null && !hasWater && !canRefill()) abandonWaterSpot();
+            if (waterSpot != null && !hasWater && !canRefill() && !canRestockIce()) abandonWaterSpot();
 
             if (waterSpot == null) {
                 startExplore(eyes);
@@ -797,6 +1381,20 @@ public class AutoTill extends Module implements Restocker.Owner {
         }
         else if (canPlant) runBatch(plantTargets, this::plant);
         else if (canBoneMeal) runBatch(boneTargets, this::applyBoneMeal);
+    }
+
+    /**
+     * Starts restocking {@code supply} if it's low and there's work waiting for it. Like seeds, it leaves a hole half dug
+     * rather than mid-swing.
+     * @return true if this tick was used
+     */
+    private boolean restockIfLow(Supply supply, boolean workWaiting) {
+        if (!workWaiting || !supply.active.getAsBoolean() || supply.unavailable || supply.count() > supply.at.get()) return false;
+
+        if (waterSpot != null && mc.gameMode.isDestroying()) mc.gameMode.stopDestroyBlock();
+        finishDigging();
+        startRestock(supply);
+        return true;
     }
 
     /**
@@ -819,7 +1417,7 @@ public class AutoTill extends Module implements Restocker.Owner {
      */
     private boolean hoeReady() {
         if (!findItem(this::isUsableHoe).found()) {
-            moveToHotbar(this::isUsableHoe);
+            moveToHotbar(hoeNeed);
 
             // Only give up when there's truly no usable hoe left, and only after a moment: a slot swap that hasn't
             // settled yet shouldn't turn the module off
@@ -830,7 +1428,8 @@ public class AutoTill extends Module implements Restocker.Owner {
                     warnedHoldHoe = true;
                 }
             }
-            else if (disableWhenOut.get() && ++hoeMissingTicks >= HOE_MISSING_TICKS) {
+            // With hoe-restock on, running out is only final once the restock has failed
+            else if (disableWhenOut.get() && !(hoeSupply.active.getAsBoolean() && !hoeSupply.unavailable) && ++hoeMissingTicks >= HOE_MISSING_TICKS) {
                 error("No usable hoe found, disabling.");
                 toggle();
             }
@@ -951,7 +1550,8 @@ public class AutoTill extends Module implements Restocker.Owner {
             return false;
         }
 
-        if (!state.isAir()) {
+        // Ice left in the hole by an earlier job is broken, never dug (the tool for digging could be a Silk Touch one)
+        if (!state.isAir() && !(iceMode() && state.is(Blocks.ICE))) {
             // A hole that never finishes digging would hold up tilling forever
             if (++digTicks > DIG_TIMEOUT_TICKS) {
                 giveUpOnWaterSpot();
@@ -964,6 +1564,8 @@ public class AutoTill extends Module implements Restocker.Owner {
         digTicks = 0;
 
         finishDigging();
+
+        if (iceMode()) return startIceHere(eyes);
 
         // Waiting between bucket tries doesn't need the tick, let tilling use it
         if (waterCooldown > 0) return false;
@@ -1071,7 +1673,515 @@ public class AutoTill extends Module implements Restocker.Owner {
         mc.gameMode.useItem(mc.player, hand);
 
         if (doSwapBack) InvUtils.swapBack();
+
+        // Its glowstone goes on once the water is in
+        if (lightHoles.get()) lightQueue.putIfAbsent(spot.immutable(), 0);
         return true;
+    }
+
+    // Ice
+
+    private boolean iceMode() {
+        return autoWater.get() && waterSource.get() == WaterSource.Ice;
+    }
+
+    /**
+     * What fills a hole.
+     */
+    private Item waterItem() {
+        return iceMode() ? Items.ICE : Items.WATER_BUCKET;
+    }
+
+    private boolean hasWaterSupply() {
+        return iceMode() ? iceUsable() && hasItem(Items.ICE) : hasItem(Items.WATER_BUCKET);
+    }
+
+    private boolean isIce(ItemStack stack) {
+        return stack.is(Items.ICE);
+    }
+
+    private boolean isGlowstone(ItemStack stack) {
+        return stack.is(Items.GLOWSTONE);
+    }
+
+    private boolean usingIceStorage() {
+        return iceSupply.usingStorage();
+    }
+
+    /**
+     * Ice can be restocked, and is worth going for.
+     */
+    private boolean canRestockIce() {
+        return iceSupply.active.getAsBoolean() && !iceSupply.unavailable && iceUsable();
+    }
+
+    private boolean iceUsable() {
+        return iceProblem() == null;
+    }
+
+    /**
+     * Why ice can't make water right now, or null if it can. Breaking ice only leaves water behind in survival, outside
+     * the Nether, with something that doesn't have Silk Touch, and with a block under the ice (holes always have one).
+     */
+    private String iceProblem() {
+        if (iceProblemTick != tickCount) {
+            iceProblemCache = computeIceProblem();
+            iceProblemTick = tickCount;
+        }
+        return iceProblemCache;
+    }
+
+    private String computeIceProblem() {
+        if (iceBroken) return "breaking ice kept not leaving any water behind";
+        if (mc.level.dimension() == Level.NETHER) return "ice doesn't turn into water in the Nether";
+        if (mc.player.isCreative()) return "breaking ice in creative mode doesn't leave any water behind";
+        if (pickIceBreaker(Blocks.ICE.defaultBlockState()) == -1) return "there's no hotbar slot to break the ice with that isn't a silk touch tool";
+        return null;
+    }
+
+    private void warnAboutIce() {
+        String problem = iceMode() ? iceProblem() : null;
+
+        if (problem == null) warnedIceProblem = false;
+        else if (!warnedIceProblem) {
+            warning("Can't water holes with ice: %s.", problem);
+            warnedIceProblem = true;
+        }
+    }
+
+    /**
+     * The hole in waterSpot is dug, so hand it to the ice job.
+     * @return true if this tick was used
+     */
+    private boolean startIceHere(Vec3 eyes) {
+        if (!iceUsable()) {
+            abandonWaterSpot();
+            return false;
+        }
+
+        // Ice that's already in the hole only needs breaking
+        if (!mc.level.getBlockState(waterSpot).is(Blocks.ICE)) {
+            moveToHotbar(iceNeed);
+            if (!findItem(this::isIce).found()) {
+                if (!warnedNoBucket && !canRestockIce()) {
+                    warning("No ice in your hotbar, can't water dry blocks.");
+                    warnedNoBucket = true;
+                }
+                return false;
+            }
+        }
+        warnedNoBucket = false;
+
+        BlockPos hole = waterSpot;
+        if (holeAttempts.merge(hole, 1, Integer::sum) > ICE_MAX_TRIES) {
+            giveUpOnWaterSpot();
+            return false;
+        }
+
+        abandonWaterSpot();
+        startIce(hole);
+        return driveIce(eyes);
+    }
+
+    private void startIce(BlockPos hole) {
+        iceHole = hole.immutable();
+        iceCooldown = 0;
+        iceJobTicks = 0;
+        iceBreakRetried = false;
+        noAimTicks = 0;
+        setIceStage(IceStage.Place);
+    }
+
+    private void setIceStage(IceStage next) {
+        iceStage = next;
+        iceStageTicks = 0;
+        iceTries = 0;
+    }
+
+    /**
+     * Advances the ice job by one step. Ice goes into the hole, then it's broken from its open top face and leaves a water
+     * source behind. Glowstone, if wanted, goes on afterwards through the light queue, so the ice is never covered while
+     * it is being broken.
+     * @return true if the tick was used, false when the job is over
+     */
+    private boolean driveIce(Vec3 eyes) {
+        BlockPos hole = iceHole;
+
+        // A trip stands still for the job and carries on afterwards
+        if (state != State.Working && !heldForHole) {
+            BaritoneHelper.stop();
+            heldForHole = true;
+            holdTicks = 0;
+        }
+
+        // Knocked away or walked off: not the hole's fault, so just let go of the job
+        if (!mc.level.isLoaded(hole) || !inReach(hole)) {
+            clearIce();
+            return false;
+        }
+
+        BlockState cell = mc.level.getBlockState(hole);
+        if (cell.getFluidState().is(FluidTags.WATER)) {
+            finishIce();
+            return false;
+        }
+
+        if (++iceJobTicks > ICE_JOB_TICKS) {
+            clearIce();
+            return false;
+        }
+
+        int limit = switch (iceStage) {
+            case Break -> DIG_TIMEOUT_TICKS;
+            case Verify -> ICE_VERIFY_TICKS;
+            default -> ICE_STAGE_TICKS;
+        };
+
+        if (++iceStageTicks > limit) {
+            switch (iceStage) {
+                case Verify -> failIce("the ice broke but no water appeared", true);
+                case Break -> failIce("the ice took too long to break", false);
+                // Placing waited too long for a clear look or for us to stand still, try again later
+                default -> clearIce();
+            }
+            return false;
+        }
+
+        return switch (iceStage) {
+            case Place -> icePlace(hole, cell, eyes);
+            case Break -> iceBreak(hole, cell);
+            case Verify -> iceVerify(cell);
+        };
+    }
+
+    private boolean icePlace(BlockPos hole, BlockState cell, Vec3 eyes) {
+        if (cell.is(Blocks.ICE)) {
+            setIceStage(IceStage.Break);
+            return true;
+        }
+
+        if (!cell.isAir()) {
+            failIce("something is in the way", false);
+            return false;
+        }
+
+        if (iceCooldown > 0) {
+            iceCooldown--;
+            return true;
+        }
+
+        if (iceTries >= ICE_MAX_TRIES) {
+            failIce("the ice wouldn't stay in", false);
+            return false;
+        }
+
+        moveToHotbar(iceNeed);
+        if (!findItem(this::isIce).found()) {
+            clearIce();
+            return false;
+        }
+
+        Vec3 aim = findPlaceAim(eyes, hole);
+        if (aim == null) {
+            // Can't see into the hole from here. Walk over to it once, and if that doesn't help, let go of it
+            // instead of standing here forever.
+            if (++noAimTicks < 20) return true;
+            noAimTicks = 0;
+
+            if (walking() && state == State.Working && !hole.equals(approachedSpot)) {
+                approachedSpot = hole;
+                goTo(hole, 2, State.Approaching);
+                return true;
+            }
+
+            clearIce();
+            return false;
+        }
+        noAimTicks = 0;
+
+        // The server traces from where it last saw us, which lags behind while we move
+        if (mc.player.getDeltaMovement().horizontalDistance() > STILL_SPEED) return true;
+
+        iceTries++;
+        iceCooldown = 3;
+        Rotations.rotate(Rotations.getYaw(aim), Rotations.getPitch(aim), () -> placeAt(hole, this::isIce));
+        return true;
+    }
+
+    private boolean iceBreak(BlockPos hole, BlockState cell) {
+        if (!cell.is(Blocks.ICE)) {
+            setIceStage(IceStage.Verify);
+            return true;
+        }
+
+        int slot = pickIceBreaker(cell);
+        if (slot == -1) {
+            failIce("there's no hotbar slot to break it with that isn't a silk touch tool", false);
+            return false;
+        }
+
+        if (autoSwitch.get() && InvUtils.swap(slot, swapBack.get())) digSwapped = true;
+        if (rotate.get()) Rotations.rotate(Rotations.getYaw(hole), Rotations.getPitch(hole));
+        BlockUtils.breakBlock(hole, true);
+        return true;
+    }
+
+    private boolean iceVerify(BlockState cell) {
+        // The server put the ice back, or never broke it
+        if (cell.is(Blocks.ICE)) setIceStage(IceStage.Break);
+        return true;
+    }
+
+    /**
+     * The hole has water. It's put in the queue to be lit if that's wanted.
+     */
+    private void finishIce() {
+        iceFailures = 0;
+        if (lightHoles.get() && !mc.level.getBlockState(iceHole.above()).is(Blocks.GLOWSTONE)) lightQueue.putIfAbsent(iceHole, 0);
+        clearIce();
+    }
+
+    /**
+     * The job is over without water. The hole is skipped from now on, and a few of these in a row turn ice off.
+     * @param noWater the ice was broken but no water came, which means ice doesn't work where we are
+     */
+    private void failIce(String reason, boolean noWater) {
+        // Ice still in the hole gets one more go at being broken before the hole is written off
+        if (!iceBreakRetried && mc.level.getBlockState(iceHole).is(Blocks.ICE) && iceUsable()) {
+            iceBreakRetried = true;
+            iceJobTicks = 0;
+            setIceStage(IceStage.Break);
+            return;
+        }
+
+        badWaterSpots.add(iceHole);
+        warning("Couldn't water the hole at %s with ice: %s.", iceHole.toShortString(), reason);
+
+        if (noWater && ++iceFailures >= ICE_MAX_FAILURES) {
+            iceBroken = true;
+            iceProblemTick = -1;
+        }
+        clearIce();
+    }
+
+    private void clearIce() {
+        cancelIce();
+        resumeAfterHole();
+    }
+
+    /**
+     * Drops the job, leaving any trip as it is.
+     */
+    private void cancelIce() {
+        if (iceHole != null && mc.gameMode != null && mc.gameMode.isDestroying()) mc.gameMode.stopDestroyBlock();
+        finishDigging();
+        iceHole = null;
+        iceStage = null;
+    }
+
+    /**
+     * Air, or something like grass that a block replaces. Fluids are replaceable too but aren't free: glowstone isn't
+     * put into water.
+     */
+    private boolean isFreeCell(BlockPos cell) {
+        BlockState at = mc.level.getBlockState(cell);
+        return at.isAir() || (at.canBeReplaced() && at.getFluidState().isEmpty());
+    }
+
+    /**
+     * Clicking it would use it (open, toggle, press) instead of placing against it.
+     */
+    private boolean isClickableBlock(BlockPos pos) {
+        return BlockUtils.isClickable(mc.level.getBlockState(pos).getBlock()) || mc.level.getBlockEntity(pos) != null;
+    }
+
+    /**
+     * Places an item into {@code cell} by clicking a block next to it, the way the player would, from where we're looking.
+     */
+    private void placeAt(BlockPos cell, Predicate<ItemStack> item) {
+        if (!isFreeCell(cell)) return;
+
+        // Same as pouring water: make sure the click lands on the face we meant from where we are now
+        BlockHitResult hit = traceLook(ClipContext.Fluid.NONE);
+        if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().relative(hit.getDirection()).equals(cell)) return;
+
+        // Clicking something replaceable would put the item there instead, and clicking a chest or a door would open it
+        if (mc.level.getBlockState(hit.getBlockPos()).canBeReplaced() || isClickableBlock(hit.getBlockPos())) return;
+
+        useOn(item, hit);
+    }
+
+    /**
+     * The hotbar slot to break ice with: the fastest thing that isn't a Silk Touch tool (that would keep the ice instead
+     * of melting it) and isn't about to break. Bare hands or any non-tool item will do, so tools are only used when they
+     * are actually faster.
+     * @return -1 if there's none
+     */
+    private int pickIceBreaker(BlockState ice) {
+        boolean canSwap = autoSwitch.get();
+        int selected = Players.selectedSlot();
+
+        int best = -1;
+        float bestSpeed = 0;
+
+        for (int i = 0; i < 9; i++) {
+            if (!canSwap && i != selected) continue;
+
+            ItemStack stack = mc.player.getInventory().getItem(i);
+            if (Utils.hasEnchantment(stack, Enchantments.SILK_TOUCH)) continue;
+
+            float speed = stack.isEmpty() ? 1f : stack.getDestroySpeed(ice);
+
+            // Tools that are no faster than a hand would just wear down for nothing
+            if (stack.isDamageableItem()) {
+                if (speed <= 1f) continue;
+                if (antiBreak.get() && stack.getMaxDamage() - stack.getDamageValue() <= minDurability.get()) continue;
+            }
+
+            if (best == -1 || speed > bestSpeed || (speed == bestSpeed && i == selected)) {
+                best = i;
+                bestSpeed = speed;
+            }
+        }
+
+        return best;
+    }
+
+    // Lighting
+
+    /**
+     * Whether a hole in reach is ready to be lit: loaded, with water in it and a free spot above that isn't lit yet.
+     */
+    private boolean hasLightableHole(Vec3 eyes) {
+        double reachSq = reach.get() * reach.get();
+        for (BlockPos hole : lightQueue.keySet()) {
+            if (!mc.level.isLoaded(hole)) continue;
+            BlockPos above = hole.above();
+            if (mc.level.getBlockState(above).is(Blocks.GLOWSTONE) || !isFreeCell(above)) continue;
+            if (eyes.distanceToSqr(Vec3.atCenterOf(above)) > reachSq) continue;
+            if (mc.level.getFluidState(hole).is(FluidTags.WATER)) return true;
+        }
+        return false;
+    }
+
+    /**
+     * Puts glowstone above the holes that got water and are waiting for it, one at a time.
+     * @return true if this tick was used
+     */
+    private boolean tickLight(Vec3 eyes) {
+        if (lightQueue.isEmpty()) return false;
+
+        if (lightCooldown > 0) {
+            lightCooldown--;
+            return false;
+        }
+
+        double reachSq = reach.get() * reach.get();
+        BlockPos best = null;
+        double bestDist = Double.MAX_VALUE;
+
+        for (Iterator<Map.Entry<BlockPos, Integer>> it = lightQueue.entrySet().iterator(); it.hasNext(); ) {
+            Map.Entry<BlockPos, Integer> entry = it.next();
+            BlockPos hole = entry.getKey();
+            if (!mc.level.isLoaded(hole)) continue;
+
+            // Lit already, or something is there that we won't touch
+            BlockState up = mc.level.getBlockState(hole.above());
+            if (up.is(Blocks.GLOWSTONE) || !isFreeCell(hole.above())) {
+                dropLight(it, hole);
+                continue;
+            }
+
+            double dist = eyes.distanceToSqr(Vec3.atCenterOf(hole.above()));
+            if (dist > reachSq) continue;
+
+            // The water has to be in first. If it never shows up the pour didn't take, so there's nothing to light.
+            if (!mc.level.getFluidState(hole).is(FluidTags.WATER)) {
+                entry.setValue(entry.getValue() + 1);
+                if (entry.getValue() > LIGHT_MAX_AGE) dropLight(it, hole);
+                continue;
+            }
+
+            if (dist < bestDist) {
+                best = hole;
+                bestDist = dist;
+            }
+        }
+
+        if (best == null) return false;
+
+        BlockPos above = best.above();
+
+        // Moving or in the way are passing conditions, they don't count against the hole
+        if (mc.player.getBoundingBox().intersects(new AABB(above))) return false;
+
+        moveToHotbar(glowstoneNeed);
+        if (!findItem(this::isGlowstone).found()) {
+            warnNoGlowstone();
+            lightQueue.clear();
+            lightTries.clear();
+            return false;
+        }
+        warnedNoGlowstone = false;
+
+        if (mc.player.getDeltaMovement().horizontalDistance() > STILL_SPEED) return false;
+
+        // Over water there's nothing to click, so it needs a block beside or above the spot, unless air placing is allowed
+        Vec3 aim = findPlaceAim(eyes, above);
+        boolean airPlace = aim == null && lightAirPlace.get();
+
+        // Only tries that go nowhere count, and they're what gets a hole given up on
+        int tries = lightTries.merge(best, 1, Integer::sum);
+        if (aim == null && !airPlace) {
+            if (tries > LIGHT_MAX_AGE) {
+                lightQueue.remove(best);
+                lightTries.remove(best);
+                warnNoLightSupport(best);
+            }
+            return false;
+        }
+
+        if (tries > LIGHT_MAX_TRIES) {
+            lightQueue.remove(best);
+            lightTries.remove(best);
+            warning("Couldn't place glowstone above the water hole at %s, leaving it unlit.", best.toShortString());
+            return false;
+        }
+
+        lightCooldown = 3;
+
+        if (airPlace) {
+            Vec3 center = Vec3.atCenterOf(above);
+            Rotations.rotate(Rotations.getYaw(center), Rotations.getPitch(center), () -> airPlaceAt(above));
+        }
+        else Rotations.rotate(Rotations.getYaw(aim), Rotations.getPitch(aim), () -> placeAt(above, this::isGlowstone));
+        return true;
+    }
+
+    /**
+     * Places glowstone into an empty spot by clicking the spot itself, which needs no block next to it.
+     */
+    private void airPlaceAt(BlockPos cell) {
+        if (!isFreeCell(cell)) return;
+
+        useOn(this::isGlowstone, new BlockHitResult(Vec3.atCenterOf(cell), Direction.UP, cell, false));
+    }
+
+    private void warnNoGlowstone() {
+        if (warnedNoGlowstone) return;
+        warning("No glowstone in your hotbar, can't light the water holes.");
+        warnedNoGlowstone = true;
+    }
+
+    private void warnNoLightSupport(BlockPos hole) {
+        if (warnedNoSupport) return;
+        warning("Nothing next to the spot above the water hole at %s to place glowstone against, so it stays unlit. Turn on light-air-place to place it against nothing.", hole.toShortString());
+        warnedNoSupport = true;
+    }
+
+    private void dropLight(Iterator<Map.Entry<BlockPos, Integer>> it, BlockPos hole) {
+        it.remove();
+        lightTries.remove(hole);
     }
 
     // Filling holes in passing
@@ -1087,6 +2197,9 @@ public class AutoTill extends Module implements Restocker.Owner {
             return false;
         }
 
+        // A hole is already being filled with ice, and that has the tick (or is off walking over to its hole)
+        if (iceHole != null) return false;
+
         Vec3 eyes = mc.player.getEyePosition();
 
         // Done with the hole we stopped for, or it's taking too long: carry on with the trip
@@ -1101,8 +2214,9 @@ public class AutoTill extends Module implements Restocker.Owner {
             return heldForHole;
         }
 
-        moveToHotbar(Items.WATER_BUCKET);
-        if (!findItem(stack -> stack.is(Items.WATER_BUCKET)).found()) {
+        Item fillItem = waterItem();
+        moveToHotbar(waterNeed());
+        if ((iceMode() && !iceUsable()) || !findItem(stack -> stack.is(fillItem)).found()) {
             passingHole = null;
             resumeAfterHole();
             return false;
@@ -1140,6 +2254,13 @@ public class AutoTill extends Module implements Restocker.Owner {
             passingHole = null;
             resumeAfterHole();
             return false;
+        }
+
+        // Ice takes a few ticks, so it's a job of its own that holds the trip until the hole has water
+        if (iceMode()) {
+            startIce(passingHole);
+            passingHole = null;
+            return driveIce(eyes);
         }
 
         BlockPos hole = passingHole;
@@ -1189,7 +2310,7 @@ public class AutoTill extends Module implements Restocker.Owner {
      */
     private boolean isOpenHole(BlockPos pos, Vec3 eyes) {
         if (!mc.level.getBlockState(pos).isAir()) return false;
-        if (pos.equals(waterSpot) || badWaterSpots.contains(pos)) return false;
+        if (pos.equals(waterSpot) || pos.equals(iceHole) || badWaterSpots.contains(pos)) return false;
         return isValidWaterSpot(pos, eyes);
     }
 
@@ -1237,14 +2358,19 @@ public class AutoTill extends Module implements Restocker.Owner {
         return best;
     }
 
+    @SuppressWarnings("deprecation")
     private boolean isValidWaterSpot(BlockPos pos, Vec3 eyes) {
         if (eyes.distanceToSqr(Vec3.atCenterOf(pos)) > reach.get() * reach.get()) return false;
 
         BlockState state = mc.level.getBlockState(pos);
         boolean diggable = blocks.get().contains(state.getBlock()) || state.is(Blocks.FARMLAND);
-        if (!diggable && !state.isAir() && !state.getFluidState().is(FluidTags.WATER)) return false;
+        boolean leftoverIce = iceMode() && state.is(Blocks.ICE);
+        if (!diggable && !leftoverIce && !state.isAir() && !state.getFluidState().is(FluidTags.WATER)) return false;
 
         if (!mc.level.getBlockState(pos.above()).isAir()) return false;
+
+        // Broken ice only turns into water over something that stops movement
+        if (iceMode() && !mc.level.getBlockState(pos.below()).blocksMotion()) return false;
 
         // The hole has to hold the water: walled in on every side and underneath
         if (!holdsWater(pos.below())) return false;
@@ -1271,6 +2397,17 @@ public class AutoTill extends Module implements Restocker.Owner {
     }
 
     private Vec3 findWaterAim(Vec3 eyes, BlockPos spot) {
+        return findAim(eyes, spot, false);
+    }
+
+    /**
+     * Like {@link #findWaterAim}, for placing blocks: faces of blocks that would be used instead of placed against don't count.
+     */
+    private Vec3 findPlaceAim(Vec3 eyes, BlockPos spot) {
+        return findAim(eyes, spot, true);
+    }
+
+    private Vec3 findAim(Vec3 eyes, BlockPos spot, boolean placing) {
         double range = mc.player.blockInteractionRange();
         Vec3 c = Vec3.atCenterOf(spot);
 
@@ -1284,7 +2421,7 @@ public class AutoTill extends Module implements Restocker.Owner {
 
         for (Vec3 aim : candidates) {
             if (aim.distanceTo(eyes) > range) continue;
-            if (landsIn(eyes, aim, spot) && aimHasSlack(eyes, aim, spot)) return aim;
+            if (landsIn(eyes, aim, spot, placing) && aimHasSlack(eyes, aim, spot, placing)) return aim;
         }
 
         return null;
@@ -1293,22 +2430,23 @@ public class AutoTill extends Module implements Restocker.Owner {
     /**
      * A bucket used from {@code eyes} looking at {@code aim} pours into {@code spot}.
      */
-    private boolean landsIn(Vec3 eyes, Vec3 aim, BlockPos spot) {
+    private boolean landsIn(Vec3 eyes, Vec3 aim, BlockPos spot, boolean placing) {
         double range = mc.player.blockInteractionRange();
         Vec3 end = eyes.add(aim.subtract(eyes).normalize().scale(range));
         BlockHitResult hit = mc.level.clip(new ClipContext(eyes, end, ClipContext.Block.OUTLINE, ClipContext.Fluid.NONE, mc.player));
-        return hit.getType() == HitResult.Type.BLOCK && hit.getBlockPos().relative(hit.getDirection()).equals(spot);
+        if (hit.getType() != HitResult.Type.BLOCK || !hit.getBlockPos().relative(hit.getDirection()).equals(spot)) return false;
+        return !placing || !isClickableBlock(hit.getBlockPos());
     }
 
     /**
      * The aim still lands in the spot from eyes shifted a little in every direction, in case the server has us
      * slightly somewhere else.
      */
-    private boolean aimHasSlack(Vec3 eyes, Vec3 aim, BlockPos spot) {
+    private boolean aimHasSlack(Vec3 eyes, Vec3 aim, BlockPos spot, boolean placing) {
         Vec3 look = aim.subtract(eyes);
         for (Direction dir : HORIZONTALS) {
             Vec3 shifted = eyes.add(dir.getStepX() * AIM_SLACK, 0, dir.getStepZ() * AIM_SLACK);
-            if (!landsIn(shifted, shifted.add(look), spot)) return false;
+            if (!landsIn(shifted, shifted.add(look), spot, placing)) return false;
         }
         return true;
     }
@@ -1329,7 +2467,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     }
 
     private boolean canRefill() {
-        return walking() && refillWater.get() && !refillUnavailable && hasItem(Items.BUCKET);
+        return walking() && !iceMode() && refillWater.get() && !refillUnavailable && hasItem(Items.BUCKET);
     }
 
     private void tickAutomation() {
@@ -1369,15 +2507,16 @@ public class AutoTill extends Module implements Restocker.Owner {
             case GoingToStorage -> {
                 if (stillTravelling()) return;
 
-                BlockPos storage = storages.current();
+                BlockPos storage = restocking.storages.current();
                 if (storage != null && inReach(storage)) {
-                    restocker.startManual(storage);
+                    restocking.restocker.startManual(storage);
                     state = State.Restocking;
                 }
                 else {
-                    storages.markBad(storage);
+                    restocking.storages.markBad(storage);
                     if (tryNextStorage()) return;
-                    noStorageFinished(storage == null ? "Couldn't reach the seed storage." : "Couldn't reach the seed storage at " + storage.toShortString() + ".");
+                    String what = restocking.noun + " storage";
+                    noStorageFinished(storage == null ? "Couldn't reach the " + what + "." : "Couldn't reach the " + what + " at " + storage.toShortString() + ".");
                     nextErrand();
                 }
             }
@@ -1388,17 +2527,18 @@ public class AutoTill extends Module implements Restocker.Owner {
     // Restocking
 
     private boolean usingStorage() {
-        return autoPlant.get() && seedRestock.get() && restockMode.get() == RestockMode.Storage;
+        return seedSupply.usingStorage();
     }
 
     /**
      * @return true if a restock started, either here or with a walk to the storage
      */
-    private boolean startRestock() {
-        seedsThisTrip = true;
+    private boolean startRestock(Supply supply) {
+        restocking = supply;
+        supply.thisTrip = true;
 
-        if (restockMode.get() == RestockMode.EnderChest) {
-            String problem = restocker.startEnderChest();
+        if (supply.mode.get() == RestockMode.EnderChest) {
+            String problem = supply.restocker.startEnderChest();
             if (problem != null) {
                 restockFailed(problem);
                 return false;
@@ -1408,9 +2548,9 @@ public class AutoTill extends Module implements Restocker.Owner {
             return true;
         }
 
-        storages.beginAttempt();
-        if (storages.isEmpty()) {
-            blockRestock("No seed storage set, use pick-storage.");
+        supply.storages.beginAttempt();
+        if (supply.storages.isEmpty()) {
+            blockRestock("No %s storage set, use %s.", supply.noun, supply.pick.name);
             return false;
         }
 
@@ -1424,11 +2564,11 @@ public class AutoTill extends Module implements Restocker.Owner {
      * @return false when there's none left to try
      */
     private boolean tryNextStorage() {
-        BlockPos storage = storages.next(mc.player.getEyePosition(), this::inReach, walking());
+        BlockPos storage = restocking.storages.next(mc.player.getEyePosition(), this::inReach, walking());
         if (storage == null) return false;
 
         if (inReach(storage)) {
-            restocker.startManual(storage);
+            restocking.restocker.startManual(storage);
             startRestockingHere();
             return true;
         }
@@ -1443,24 +2583,27 @@ public class AutoTill extends Module implements Restocker.Owner {
      * No storage is left to try: turns restocking off if they're all empty, pauses it otherwise.
      */
     private void noStorageLeft() {
-        if (storages.allEmpty()) {
-            error("All %d seed storages are empty. Turning off seed-restock.", storages.size());
-            seedRestock.set(false);
-            storages.forgetEmpty();
+        Supply supply = restocking;
+
+        if (supply.storages.allEmpty()) {
+            error("All %d %s storages are empty. Turning off %s.", supply.storages.size(), supply.noun, supply.enabled.name);
+            supply.enabled.set(false);
+            supply.storages.forgetEmpty();
         }
-        else if (storages.skippedOutOfReach() && !autoWalk.get()) blockRestock("The seed storages are out of reach, turn on auto-walk to walk there.");
-        else if (storages.skippedOutOfReach()) blockRestock("Baritone isn't installed, so I can't walk to the seed storages.");
-        else blockRestock("Couldn't use any of the seed storages.");
+        else if (supply.storages.skippedOutOfReach() && !autoWalk.get()) blockRestock("The %s storages are out of reach, turn on auto-walk to walk there.", supply.noun);
+        else if (supply.storages.skippedOutOfReach()) blockRestock("Baritone isn't installed, so I can't walk to the %s storages.", supply.noun);
+        else blockRestock("Couldn't use any of the %s storages.", supply.noun);
     }
 
     /**
-     * A storage failed and there's none left to try. If an earlier one got us enough seeds, that still counts.
+     * A storage failed and there's none left to try. If an earlier one got us enough, that still counts.
      */
     private void noStorageFinished(String reason) {
-        int seedCount = InvUtils.find(this::isSeed).count();
+        Supply supply = restocking;
+        int count = supply.count();
 
-        if (storages.allEmpty()) noStorageLeft();
-        else if (seedCount > restockAt.get()) info("Restocked seeds, you now have %d.", seedCount);
+        if (supply.storages.allEmpty()) noStorageLeft();
+        else if (count > supply.at.get()) info("Restocked %s, you now have %d.", supply.items, count);
         else blockRestock("%s", reason);
     }
 
@@ -1472,44 +2615,46 @@ public class AutoTill extends Module implements Restocker.Owner {
     }
 
     private void tickRestock() {
-        switch (restocker.tick()) {
+        Supply supply = restocking;
+
+        switch (supply.restocker.tick()) {
             case Busy -> {}
             case Done -> {
-                int seedCount = InvUtils.find(this::isSeed).count();
+                int count = supply.count();
 
-                if (restockMode.get() == RestockMode.Storage) {
-                    if (restocker.sourceEmpty()) storages.markEmpty(storages.current());
+                if (supply.mode.get() == RestockMode.Storage) {
+                    if (supply.restocker.sourceEmpty()) supply.storages.markEmpty(supply.storages.current());
 
                     // Still low, so carry on with the next storage before heading back
-                    if (seedCount <= restockAt.get() && tryNextStorage()) return;
+                    if (count <= supply.at.get() && tryNextStorage()) return;
 
-                    if (storages.allEmpty()) {
-                        warning("Restocked to %d seeds, but that emptied all %d seed storages. Turning off seed-restock.", seedCount, storages.size());
-                        seedRestock.set(false);
-                        storages.forgetEmpty();
+                    if (supply.storages.allEmpty()) {
+                        warning("Restocked to %d %s, but that emptied all %d %s storages. Turning off %s.", count, supply.items, supply.storages.size(), supply.noun, supply.enabled.name);
+                        supply.enabled.set(false);
+                        supply.storages.forgetEmpty();
                     }
                     // Restocking goes first, so storages that have run dry would otherwise send us straight back
-                    else if (seedCount <= restockAt.get()) blockRestock("Restocked, but you only have %d seeds. Are the storages running low?", seedCount);
-                    else info("Restocked seeds, you now have %d.", seedCount);
+                    else if (count <= supply.at.get()) blockRestock("Restocked, but you only have %d %s. Are the storages running low?", count, supply.items);
+                    else info("Restocked %s, you now have %d.", supply.items, count);
                 }
-                else if (restocker.sourceEmpty()) {
-                    warning("Restocked to %d seeds, but that emptied your %s. Turning off seed-restock.", seedCount, sourceName());
-                    seedRestock.set(false);
+                else if (supply.restocker.sourceEmpty()) {
+                    warning("Restocked to %d %s, but that emptied your %s. Turning off %s.", count, supply.items, sourceName(), supply.enabled.name);
+                    supply.enabled.set(false);
                 }
-                else if (seedCount <= restockAt.get()) blockRestock("Restocked, but you only have %d seeds. Is the storage running low?", seedCount);
-                else info("Restocked seeds, you now have %d.", seedCount);
+                else if (count <= supply.at.get()) blockRestock("Restocked, but you only have %d %s. Is the storage running low?", count, supply.items);
+                else info("Restocked %s, you now have %d.", supply.items, count);
 
                 nextErrand();
             }
             case Failed -> {
-                if (restockMode.get() == RestockMode.Storage) {
-                    if (restocker.sourceEmpty()) storages.markEmpty(storages.current());
-                    else storages.markBad(storages.current());
+                if (supply.mode.get() == RestockMode.Storage) {
+                    if (supply.restocker.sourceEmpty()) supply.storages.markEmpty(supply.storages.current());
+                    else supply.storages.markBad(supply.storages.current());
 
                     if (tryNextStorage()) return;
-                    noStorageFinished(restocker.failure());
+                    noStorageFinished(supply.restocker.failure());
                 }
-                else restockFailed(restocker.failure());
+                else restockFailed(supply.restocker.failure());
                 nextErrand();
             }
         }
@@ -1519,15 +2664,15 @@ public class AutoTill extends Module implements Restocker.Owner {
      * A storage seen to be empty turns restocking off, anything else only pauses it for a while.
      */
     private void restockFailed(String reason) {
-        if (restocker.sourceEmpty()) {
-            error("%s Turning off seed-restock.", reason);
-            seedRestock.set(false);
+        if (restocking.restocker.sourceEmpty()) {
+            error("%s Turning off %s.", reason, restocking.enabled.name);
+            restocking.enabled.set(false);
         }
-        else blockRestock(reason);
+        else blockRestock("%s", reason);
     }
 
     private String sourceName() {
-        return restockMode.get() == RestockMode.EnderChest ? "ender chest's seed shulkers" : "seed storage";
+        return restocking.mode.get() == RestockMode.EnderChest ? "ender chest's " + restocking.noun + " shulkers" : restocking.noun + " storage";
     }
 
     /**
@@ -1536,15 +2681,28 @@ public class AutoTill extends Module implements Restocker.Owner {
      */
     private void nextErrand() {
         if (returnPos != null && walking() && combineTrips.get()) {
-            if (!seedsThisTrip && wantsSeedTopUp() && startRestock()) return;
+            if (!seedSupply.thisTrip && wantsTopUp(seedSupply, topUpAt) && startRestock(seedSupply)) return;
+            if (!iceSupply.thisTrip && iceUsable() && wantsTopUp(iceSupply, iceTopUpAt) && startRestock(iceSupply)) return;
+            if (!boneMealSupply.thisTrip && wantsTopUp(boneMealSupply, boneMealTopUpAt) && startRestock(boneMealSupply)) return;
+            if (!glowstoneSupply.thisTrip && wantsTopUp(glowstoneSupply, glowstoneTopUpAt) && startRestock(glowstoneSupply)) return;
             if (!waterThisTrip && autoWater.get() && canRefill() && startRefill()) return;
         }
 
         goBack();
     }
 
-    private boolean wantsSeedTopUp() {
-        return autoPlant.get() && seedRestock.get() && !restockUnavailable && InvUtils.find(this::isSeed).count() < topUpAt.get();
+    /**
+     * Turns off every pick flag (the station's too) but {@code keep}, so a click is only ever for one thing.
+     */
+    private void onlyPick(Setting<Boolean> keep) {
+        if (keep != pickStation) pickStation.set(false);
+        for (Supply supply : supplies) {
+            if (supply.pick != keep) supply.pick.set(false);
+        }
+    }
+
+    private boolean wantsTopUp(Supply supply, Setting<Integer> topUp) {
+        return supply.active.getAsBoolean() && !supply.unavailable && supply.count() < topUp.get();
     }
 
     /**
@@ -1552,8 +2710,8 @@ public class AutoTill extends Module implements Restocker.Owner {
      */
     private void blockRestock(String message, Object... args) {
         warning(message, args);
-        restockUnavailable = true;
-        restockRetryTicks = RESTOCK_RETRY_TICKS;
+        restocking.unavailable = true;
+        restocking.retryTicks = RESTOCK_RETRY_TICKS;
     }
 
     /**
@@ -1627,7 +2785,7 @@ public class AutoTill extends Module implements Restocker.Owner {
      * Back to working in place, holding whatever we held before Baritone took over.
      */
     private void endTrip() {
-        seedsThisTrip = waterThisTrip = false;
+        clearTrip();
 
         if (state != State.Working && slotBeforeTrip >= 0 && mc.player != null
             && Players.selectedSlot() != slotBeforeTrip) {
@@ -1638,9 +2796,14 @@ public class AutoTill extends Module implements Restocker.Owner {
         state = State.Working;
     }
 
+    private void clearTrip() {
+        for (Supply supply : supplies) supply.thisTrip = false;
+        waterThisTrip = false;
+    }
+
     private void goBack() {
         pool = null;
-        seedsThisTrip = waterThisTrip = false;
+        clearTrip();
         if (returnPos != null) goTo(returnPos, 1, State.Returning);
         else endTrip();
         returnPos = null;
@@ -1655,7 +2818,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         BlockPos target = findLand(eyes);
 
         // All tilled: walk over to a hole we missed that would water dry farmland, fill-holes does the rest
-        if (target == null && autoWater.get() && fillHoles.get() && hasItem(Items.WATER_BUCKET)) {
+        if (target == null && autoWater.get() && fillHoles.get() && hasWaterSupply()) {
             target = findMissedHole(eyes);
             if (target != null) holeTrips.add(target);
         }
@@ -1706,8 +2869,24 @@ public class AutoTill extends Module implements Restocker.Owner {
         return true;
     }
 
-    private BlockPos findLand(Vec3 eyes) {
+    /**
+     * Starts the sweep over, facing the way the player is now.
+     */
+    private void resetSweep() {
+        sweep.reset(mc.player != null ? mc.player.getYRot() : Float.NaN);
+    }
+
+    private void prepareSweep() {
         if (home == null) home = mc.player.blockPosition();
+        sweep.prepare(workPattern.get(), rowDirection.get(), laneWidth.get(), reach.get(), home.getX(), home.getZ(), searchRadius.get(), mc.player.getYRot());
+    }
+
+    /**
+     * The next land to till in the search area that's out of reach: the nearest, or the first in the work pattern's
+     * order (nearest breaking ties).
+     */
+    private BlockPos findLand(Vec3 eyes) {
+        prepareSweep();
 
         int radius = searchRadius.get();
         int height = searchHeight.get();
@@ -1715,33 +2894,54 @@ public class AutoTill extends Module implements Restocker.Owner {
 
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
+        long bestKey = Long.MAX_VALUE;
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 
-        // Column by column, skipping unloaded chunks and anything that can't beat the best so far
-        for (int x = home.getX() - radius; x <= home.getX() + radius; x++) {
-            double dx = x + 0.5 - eyes.x;
-            double dx2 = dx * dx;
-            if (dx2 >= bestDist) continue;
+        // Rows are laid over the box the work sits in, so the first scan of a run only measures that box
+        for (int pass = sweep.needsBounds() ? 0 : 1; pass < 2; pass++) {
+            boolean measuring = pass == 0;
+            if (measuring) sweep.beginBounds();
+            boolean patterned = sweep.active();
 
-            for (int z = home.getZ() - radius; z <= home.getZ() + radius; z++) {
-                double dz = z + 0.5 - eyes.z;
-                double dxz = dx2 + dz * dz;
-                if (dxz >= bestDist || !mc.level.hasChunk(x >> 4, z >> 4)) continue;
+            // Column by column, skipping unloaded chunks and anything that can't beat the best so far. The pattern key
+            // is the same for a whole column, only equal keys fall back to the distance.
+            for (int x = home.getX() - radius; x <= home.getX() + radius; x++) {
+                double dx = x + 0.5 - eyes.x;
+                double dx2 = dx * dx;
+                if (!patterned && !measuring && dx2 >= bestDist) continue;
 
-                for (int py = y - height; py <= y + height; py++) {
-                    double dy = py + 0.5 - eyes.y;
-                    double dist = dxz + dy * dy;
-                    if (dist >= bestDist) continue;
+                for (int z = home.getZ() - radius; z <= home.getZ() + radius; z++) {
+                    double dz = z + 0.5 - eyes.z;
+                    double dxz = dx2 + dz * dz;
+                    if (!mc.level.hasChunk(x >> 4, z >> 4)) continue;
 
-                    pos.set(x, py, z);
-                    if (!isTillableBlock(pos) || inReach(pos) || unreachable.contains(pos) || failedTills.contains(pos)) continue;
+                    long key = sweep.key(x, z, bestKey);
+                    if (key > bestKey || (key == bestKey && dxz >= bestDist)) continue;
 
-                    best = pos.immutable();
-                    bestDist = dist;
+                    for (int py = y - height; py <= y + height; py++) {
+                        double dy = py + 0.5 - eyes.y;
+                        double dist = dxz + dy * dy;
+                        if (key == bestKey && dist >= bestDist) continue;
+
+                        pos.set(x, py, z);
+                        if (!isTillableBlock(pos) || inReach(pos) || unreachable.contains(pos) || failedTills.contains(pos)) continue;
+
+                        if (measuring) {
+                            sweep.include(x, z);
+                            break;
+                        }
+
+                        best = pos.immutable();
+                        bestDist = dist;
+                        bestKey = key;
+                    }
                 }
             }
+
+            if (measuring) sweep.endBounds(mc.player.blockPosition().getX(), mc.player.blockPosition().getZ());
         }
 
+        if (best != null) sweep.picked(bestKey);
         return best;
     }
 
@@ -1755,7 +2955,10 @@ public class AutoTill extends Module implements Restocker.Owner {
         badStands.clear();
         standTries = 0;
 
-        if (usingStation()) {
+        // The settings can be switched mid-trip, so the trip sticks to the source it set out for
+        tripStation = usingStation();
+
+        if (tripStation) {
             if (station.get().equals(BlockPos.ZERO)) {
                 blockRefill("No refill station set, tilling dry land without water for now.");
                 return false;
@@ -1802,7 +3005,7 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     private void arriveAtWater() {
         // The station or a remembered pool may not have been loaded when we set off
-        pool = usingStation() ? stationPool() : squareAt(poolCorner);
+        pool = tripStation ? stationPool() : squareAt(poolCorner);
 
         if (pool == null || pool.isEmpty()) {
             failPool("there's no water source there anymore");
@@ -1810,7 +3013,7 @@ public class AutoTill extends Module implements Restocker.Owner {
         }
 
         if (findFillAim() != null) {
-            if (!usingStation()) knownPoolCorner = poolCorner;
+            if (!tripStation) knownPoolCorner = poolCorner;
 
             state = State.Filling;
             stateTicks = 0;
@@ -1845,7 +3048,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     }
 
     private void failPool(String reason) {
-        if (usingStation()) {
+        if (tripStation) {
             blockRefill("Couldn't refill at the station at %s: %s. Tilling dry land without water for now.", station.get().toShortString(), reason);
             nextErrand();
             return;
@@ -1879,7 +3082,7 @@ public class AutoTill extends Module implements Restocker.Owner {
     }
 
     private boolean usingStation() {
-        return autoWalk.get() && refillWater.get() && refillSource.get() == RefillSource.Station;
+        return autoWalk.get() && !iceMode() && refillWater.get() && refillSource.get() == RefillSource.Station;
     }
 
     /**
@@ -2019,7 +3222,7 @@ public class AutoTill extends Module implements Restocker.Owner {
             return;
         }
 
-        moveToHotbar(Items.BUCKET);
+        moveToHotbar(emptyBucketNeed);
         if (!findItem(stack -> stack.is(Items.BUCKET)).found() || stateTicks > FILL_TIMEOUT_TICKS) {
             warnedNoBucket = false;
             nextErrand();
@@ -2149,10 +3352,18 @@ public class AutoTill extends Module implements Restocker.Owner {
     }
 
     /**
-     * Pulls an item from the main inventory into an empty hotbar slot so it can be used.
+     * Pulls an item from the main inventory into the hotbar so it can be used: through auto-hotbar if it's on, otherwise
+     * into an empty slot.
      */
-    private void moveToHotbar(Item item) {
-        moveToHotbar(stack -> stack.is(item));
+    private void moveToHotbar(AutoHotbar.Need need) {
+        if (!autoSwitch.get()) return;
+
+        if (autoHotbar.get()) hotbar.ensure(need);
+        else moveToHotbar(need.test());
+    }
+
+    private AutoHotbar.Need waterNeed() {
+        return iceMode() ? iceNeed : bucketNeed;
     }
 
     @Override
@@ -2215,6 +3426,10 @@ public class AutoTill extends Module implements Restocker.Owner {
 
         if (waterSpot != null) {
             event.renderer.box(waterSpot, waterSideColor.get(), waterLineColor.get(), shapeMode.get(), 0);
+        }
+
+        if (iceHole != null) {
+            event.renderer.box(iceHole, waterSideColor.get(), waterLineColor.get(), shapeMode.get(), 0);
         }
     }
 }

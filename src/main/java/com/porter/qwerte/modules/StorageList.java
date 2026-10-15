@@ -249,9 +249,16 @@ class StorageList {
     // GUI
 
     WWidget widget(GuiTheme theme, String title, BooleanSupplier active) {
+        return widget(theme, title, "pick-storage", active);
+    }
+
+    /**
+     * @param pickName the name of the setting that adds storages, shown in the hint
+     */
+    WWidget widget(GuiTheme theme, String title, String pickName, BooleanSupplier active) {
         WVerticalList list = theme.verticalList();
         if (!active.getAsBoolean()) {
-            list.add(theme.label("Storages are used when restock is on and restock-mode is Storage."));
+            list.add(theme.label(title + " are used when their restock is on and the restock mode is Storage."));
             return list;
         }
 
@@ -262,19 +269,19 @@ class StorageList {
 
         clear.action = () -> {
             clear();
-            fill(theme, title, heading, table);
+            fill(theme, title, pickName, heading, table);
         };
-        fill(theme, title, heading, table);
+        fill(theme, title, pickName, heading, table);
         return list;
     }
 
-    private void fill(GuiTheme theme, String title, WLabel heading, WTable table) {
+    private void fill(GuiTheme theme, String title, String pickName, WLabel heading, WTable table) {
         table.clear();
         List<BlockPos> list = all();
         heading.set(title + " (" + list.size() + ")");
 
         if (list.isEmpty()) {
-            table.add(theme.label("None yet, turn on pick-storage and right-click a container."));
+            table.add(theme.label("None yet, turn on " + pickName + " and right-click a container."));
             return;
         }
 
@@ -288,7 +295,7 @@ class StorageList {
             minus.tooltip = "Remove this storage.";
             minus.action = () -> {
                 remove(pos);
-                fill(theme, title, heading, table);
+                fill(theme, title, pickName, heading, table);
             };
             table.row();
         }

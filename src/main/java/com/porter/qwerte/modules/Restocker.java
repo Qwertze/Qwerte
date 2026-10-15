@@ -25,7 +25,9 @@ import net.minecraft.world.phys.BlockHitResult;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.function.IntFunction;
+import java.util.function.IntSupplier;
 import java.util.function.Predicate;
+import java.util.function.ToIntFunction;
 
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
@@ -72,6 +74,9 @@ class Restocker {
     private int shulkerSlot = -1;
     private Item shulkerItem;
     private int startCount;
+    // Most items to take in one go and how to tell the best from the rest, none by default (take everything)
+    private IntSupplier limit;
+    private ToIntFunction<ItemStack> rank;
     private int echestCount, shulkerCount;
 
     // How many wanted items are left in the source once we're done, -1 while unknown
@@ -86,6 +91,17 @@ class Restocker {
         this.module = module;
         this.wanted = wanted;
         this.what = what;
+    }
+
+    /**
+     * Stops taking once {@code amount} more of the items are in the inventory, the highest ranked first, instead of
+     * emptying the container. A stack is taken whole, so stackable items can overshoot; this is meant for items that
+     * don't stack. The count is per container, so each storage visited can add that many.
+     */
+    Restocker limit(IntSupplier amount, ToIntFunction<ItemStack> rank) {
+        this.limit = amount;
+        this.rank = rank;
+        return this;
     }
 
     String failure() {
@@ -311,16 +327,26 @@ class Restocker {
         if (menu == mc.player.inventoryMenu) return false;
         if (emptySlots() <= keepFree) return false;
 
+        if (limit != null && InvUtils.find(wanted).count() - startCount >= limit.getAsInt()) return false;
+
         int containerSlots = menu.slots.size() - 36;
+        int best = -1, bestRank = Integer.MIN_VALUE;
         for (int i = 0; i < containerSlots; i++) {
-            if (wanted.test(menu.getSlot(i).getItem())) {
-                InvUtils.shiftClick().slotId(i);
-                wait = CLICK_DELAY;
-                return true;
+            ItemStack stack = menu.getSlot(i).getItem();
+            if (!wanted.test(stack)) continue;
+
+            int stackRank = rank != null ? rank.applyAsInt(stack) : 0;
+            if (best == -1 || stackRank > bestRank) {
+                best = i;
+                bestRank = stackRank;
             }
+            if (rank == null) break;
         }
 
-        return false;
+        if (best == -1) return false;
+        InvUtils.shiftClick().slotId(best);
+        wait = CLICK_DELAY;
+        return true;
     }
 
     /**

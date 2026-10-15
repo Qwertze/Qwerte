@@ -4,7 +4,10 @@ import com.porter.qwerte.QwerteAddon;
 import com.porter.qwerte.compat.Players;
 import com.porter.qwerte.compat.RightClick;
 import com.porter.qwerte.modules.AutoTill.RestockMode;
+import com.porter.qwerte.utils.AutoHotbar;
 import com.porter.qwerte.utils.BaritoneHelper;
+import com.porter.qwerte.utils.WorkPattern;
+import com.porter.qwerte.utils.WorkPattern.RowDirection;
 import meteordevelopment.meteorclient.gui.GuiTheme;
 import meteordevelopment.meteorclient.gui.widgets.WWidget;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
@@ -50,6 +53,7 @@ import java.util.function.Predicate;
 public class AutoDirt extends Module implements Restocker.Owner {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgRestock = settings.createGroup("Restock");
+    private final SettingGroup sgHotbar = settings.createGroup("Hotbar");
     private final SettingGroup sgAutomation = settings.createGroup("Automation");
     private final SettingGroup sgRender = settings.createGroup("Render");
 
@@ -203,12 +207,60 @@ public class AutoDirt extends Module implements Restocker.Owner {
         .build()
     );
 
+    // Hotbar
+
+    private final Setting<Boolean> autoHotbar = sgHotbar.add(new BoolSetting.Builder()
+        .name("auto-hotbar")
+        .description("Keeps the dirt in your hotbar: pulls it out of your inventory when it's missing from the hotbar, and tops the hotbar stack up when it runs low. Never drops anything, and never moves anything while a screen is open. When off, dirt is only pulled into the hotbar when it's missing.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> dirtSlot = sgHotbar.add(new IntSetting.Builder()
+        .name("dirt-slot")
+        .description("The hotbar slot (1-9) to keep the dirt in. 0 uses any free slot.")
+        .defaultValue(0)
+        .range(0, 9)
+        .sliderRange(0, 9)
+        .visible(autoHotbar::get)
+        .build()
+    );
+
     // Automation
 
     private final Setting<Boolean> autoWalk = sgAutomation.add(new BoolSetting.Builder()
         .name("auto-walk")
         .description("Uses Baritone to walk to more uncovered ground when nothing is left in reach.")
         .defaultValue(false)
+        .build()
+    );
+
+    private final Setting<WorkPattern> workPattern = sgAutomation.add(new EnumSetting.Builder<WorkPattern>()
+        .name("work-pattern")
+        .description("How to pick the next ground to cover when nothing is left in reach. Nearest: always the closest uncovered spot. Rows: sweeps back and forth along parallel lanes, like mowing a lawn. Spiral Out: rings from where you enabled it outwards. Spiral In: the outer ring first, working towards the middle.")
+        .defaultValue(WorkPattern.Nearest)
+        .onChanged(pattern -> resetSweep())
+        .visible(autoWalk::get)
+        .build()
+    );
+
+    private final Setting<RowDirection> rowDirection = sgAutomation.add(new EnumSetting.Builder<RowDirection>()
+        .name("row-direction")
+        .description("Which way the lanes run. Auto runs them the way you were facing when you enabled the module.")
+        .defaultValue(RowDirection.Auto)
+        .onChanged(direction -> resetSweep())
+        .visible(() -> autoWalk.get() && workPattern.get() == WorkPattern.Rows)
+        .build()
+    );
+
+    private final Setting<Integer> laneWidth = sgAutomation.add(new IntSetting.Builder()
+        .name("lane-width")
+        .description("How wide each lane or ring is in blocks. 0 works it out from your reach, so one pass covers everything you can reach.")
+        .defaultValue(0)
+        .range(0, 32)
+        .sliderRange(0, 16)
+        .onChanged(width -> resetSweep())
+        .visible(() -> autoWalk.get() && (workPattern.get() == WorkPattern.Rows || workPattern.get() == WorkPattern.SpiralOut || workPattern.get() == WorkPattern.SpiralIn))
         .build()
     );
 
@@ -284,6 +336,9 @@ public class AutoDirt extends Module implements Restocker.Owner {
     private boolean warnedInventory;
 
     private final Restocker restocker = new Restocker(this, this::isDirtItem, "dirt");
+
+    private final AutoHotbar.Need dirtNeed = new AutoHotbar.Need("dirt", this::isDirtItem, dirtSlot::get, true, () -> true);
+    private final AutoHotbar hotbar = new AutoHotbar(autoHotbar::get, stack -> false, message -> warning("%s", message), message -> info("%s", message), List.of(dirtNeed));
     private final StorageList storages = new StorageList(storageData, () -> restockUnavailable = false);
     private State state = State.Working;
     private boolean restockUnavailable;
@@ -296,6 +351,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
 
     // Auto-walk
     private BlockPos home;
+    private final WorkPattern.Sweep sweep = new WorkPattern.Sweep();
     private BlockPos pathTarget;
     private int pathRange;
     private int exploreCooldown;
@@ -353,6 +409,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
 
     @Override
     public void onActivate() {
+        hotbar.reset();
         targets.clear();
         attempts.clear();
         failed.clear();
@@ -368,6 +425,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
         slotBefore = -1;
 
         home = mc.player != null ? mc.player.blockPosition() : null;
+        resetSweep();
         pathTarget = null;
         exploreCooldown = 0;
         unreachable.clear();
@@ -433,6 +491,9 @@ public class AutoDirt extends Module implements Restocker.Owner {
             return;
         }
 
+        // Keep the dirt in the hotbar. A move takes the tick, so it never lands in the same tick as a placement.
+        if (hotbar.tick()) return;
+
         // Places that keep failing are forgotten once we're out of reach of them, so they get another go later
         double forgetSq = (reach.get() + 2) * (reach.get() + 2);
         Vec3 eyes = mc.player.getEyePosition();
@@ -450,8 +511,9 @@ public class AutoDirt extends Module implements Restocker.Owner {
         if (!dirt.found()) {
             FindItemResult anywhere = InvUtils.find(this::isDirtItem);
             if (anywhere.found()) {
+                if (autoHotbar.get()) hotbar.ensure(dirtNeed);
                 // Pull a stack into a free hotbar slot, or the selected one if the hotbar is full
-                InvUtils.move().from(anywhere.slot()).toHotbar(freeHotbarSlot());
+                else InvUtils.move().from(anywhere.slot()).toHotbar(freeHotbarSlot());
                 return;
             }
 
@@ -511,7 +573,26 @@ public class AutoDirt extends Module implements Restocker.Owner {
             targets.add(pos);
         }
 
-        targets.sort(Comparator.comparingDouble(pos -> eyes.distanceToSqr(Vec3.atCenterOf(pos))));
+        Comparator<BlockPos> nearestFirst = Comparator.comparingDouble(pos -> eyes.distanceToSqr(Vec3.atCenterOf(pos)));
+
+        // With a work pattern the strip in reach is finished in the sweep's order, the nearest only breaks ties
+        if (walking() && workPattern.get() != WorkPattern.Nearest) {
+            prepareSweep();
+            targets.sort(Comparator.comparingLong((BlockPos pos) -> sweep.key(pos.getX(), pos.getZ(), Long.MAX_VALUE)).thenComparing(nearestFirst));
+        }
+        else targets.sort(nearestFirst);
+    }
+
+    /**
+     * Starts the sweep over, facing the way the player is now.
+     */
+    private void resetSweep() {
+        sweep.reset(mc.player != null ? mc.player.getYRot() : Float.NaN);
+    }
+
+    private void prepareSweep() {
+        if (home == null) home = mc.player.blockPosition();
+        sweep.prepare(workPattern.get(), rowDirection.get(), laneWidth.get(), reach.get(), home.getX(), home.getZ(), searchRadius.get(), mc.player.getYRot());
     }
 
     /**
@@ -855,7 +936,8 @@ public class AutoDirt extends Module implements Restocker.Owner {
     }
 
     /**
-     * The nearest spot to cover in the search area around home that's out of reach and hasn't failed us.
+     * The next spot to cover in the search area around home that's out of reach and hasn't failed us: the nearest, or
+     * the first one in the work pattern's order (nearest breaking ties).
      */
     private BlockPos findGround(Vec3 eyes) {
         if (home == null) home = mc.player.blockPosition();
@@ -866,36 +948,58 @@ public class AutoDirt extends Module implements Restocker.Owner {
         int maxY = belowFeet.get() ? feet.getY() : feet.getY() + searchHeight.get();
         double reachSq = reach.get() * reach.get();
 
+        prepareSweep();
         BlockPos best = null;
         double bestDist = Double.MAX_VALUE;
+        long bestKey = Long.MAX_VALUE;
         BlockPos.MutableBlockPos pos = new BlockPos.MutableBlockPos();
 
-        // Column by column: unloaded chunks are skipped, and the distance is worked out without allocating anything
-        for (int x = home.getX() - radius; x <= home.getX() + radius; x++) {
-            double dx = x + 0.5 - eyes.x;
-            double dx2 = dx * dx;
-            if (dx2 >= bestDist) continue;
+        // Rows are laid over the box the work sits in, so the first scan of a run only measures that box
+        for (int pass = sweep.needsBounds() ? 0 : 1; pass < 2; pass++) {
+            boolean measuring = pass == 0;
+            if (measuring) sweep.beginBounds();
+            boolean patterned = sweep.active();
 
-            for (int z = home.getZ() - radius; z <= home.getZ() + radius; z++) {
-                double dz = z + 0.5 - eyes.z;
-                double dxz = dx2 + dz * dz;
-                if (dxz >= bestDist || !mc.level.hasChunk(x >> 4, z >> 4)) continue;
+            // Column by column: unloaded chunks are skipped, and the distance is worked out without allocating anything.
+            // The pattern key is the same for a whole column, only equal keys fall back to the distance.
+            for (int x = home.getX() - radius; x <= home.getX() + radius; x++) {
+                double dx = x + 0.5 - eyes.x;
+                double dx2 = dx * dx;
+                if (!patterned && !measuring && dx2 >= bestDist) continue;
 
-                for (int y = minY; y <= maxY; y++) {
-                    double dy = y + 0.5 - eyes.y;
-                    double dist = dxz + dy * dy;
-                    if (dist <= reachSq || dist >= bestDist) continue;
+                for (int z = home.getZ() - radius; z <= home.getZ() + radius; z++) {
+                    double dz = z + 0.5 - eyes.z;
+                    double dxz = dx2 + dz * dz;
+                    if (!mc.level.hasChunk(x >> 4, z >> 4)) continue;
 
-                    pos.set(x, y, z);
-                    if (failed.contains(pos) || unreachable.contains(pos)) continue;
-                    if (!isTarget(pos)) continue;
+                    long key = sweep.key(x, z, bestKey);
+                    if (key > bestKey || (key == bestKey && dxz >= bestDist)) continue;
 
-                    best = pos.immutable();
-                    bestDist = dist;
+                    for (int y = minY; y <= maxY; y++) {
+                        double dy = y + 0.5 - eyes.y;
+                        double dist = dxz + dy * dy;
+                        if (dist <= reachSq || (key == bestKey && dist >= bestDist)) continue;
+
+                        pos.set(x, y, z);
+                        if (failed.contains(pos) || unreachable.contains(pos)) continue;
+                        if (!isTarget(pos)) continue;
+
+                        if (measuring) {
+                            sweep.include(x, z);
+                            break;
+                        }
+
+                        best = pos.immutable();
+                        bestDist = dist;
+                        bestKey = key;
+                    }
                 }
             }
+
+            if (measuring) sweep.endBounds(feet.getX(), feet.getZ());
         }
 
+        if (best != null) sweep.picked(bestKey);
         return best;
     }
 

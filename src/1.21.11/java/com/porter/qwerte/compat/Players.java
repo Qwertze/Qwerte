@@ -1,5 +1,8 @@
 package com.porter.qwerte.compat;
 
+import net.minecraft.tags.ItemTags;
+import net.minecraft.world.item.ItemStack;
+
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
@@ -14,5 +17,9 @@ public final class Players {
      */
     public static int selectedSlot() {
         return mc.player.getInventory().getSelectedSlot();
+    }
+
+    public static boolean isSpear(ItemStack stack) {
+        return stack.is(ItemTags.SPEARS);
     }
 }

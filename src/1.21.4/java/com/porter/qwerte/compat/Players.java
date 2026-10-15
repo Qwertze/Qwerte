@@ -1,5 +1,7 @@
 package com.porter.qwerte.compat;
 
+import net.minecraft.world.item.ItemStack;
+
 import static meteordevelopment.meteorclient.MeteorClient.mc;
 
 /**
@@ -14,5 +16,12 @@ public final class Players {
      */
     public static int selectedSlot() {
         return mc.player.getInventory().selected;
+    }
+
+    /**
+     * Spears don't exist in this version.
+     */
+    public static boolean isSpear(ItemStack stack) {
+        return false;
     }
 }
