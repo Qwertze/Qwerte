@@ -115,6 +115,7 @@ public final class Kits {
         if (kit.slotCount() == 0) return "Your 27 main inventory slots are empty, put the kit there first.";
         for (ItemStack stack : kit.layout()) {
             if (!stack.isEmpty() && Utils.isShulker(stack.getItem())) return "Kits can't contain shulker boxes.";
+            if (!stack.isEmpty() && stack.has(net.minecraft.core.component.DataComponents.BUNDLE_CONTENTS)) return "Kits can't contain bundles.";
         }
 
         kits.add(kit);

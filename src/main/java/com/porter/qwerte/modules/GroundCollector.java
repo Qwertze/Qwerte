@@ -271,7 +271,15 @@ final class GroundCollector {
      */
     private AABB area() {
         Stash stash = owner.stash();
-        if (stash == null || stash.boxes.isEmpty()) return null;
+        if (stash == null) return null;
+
+        // A perimeter is the area, grown by the range
+        if (stash.hasArea()) {
+            BlockPos lo = stash.areaMin(), hi = stash.areaMax();
+            int range = owner.range();
+            return new AABB(lo.getX() - range, lo.getY() - VERTICAL, lo.getZ() - range, hi.getX() + 1 + range, hi.getY() + 1 + VERTICAL, hi.getZ() + 1 + range);
+        }
+        if (stash.boxes.isEmpty()) return null;
 
         int minX = Integer.MAX_VALUE, minY = Integer.MAX_VALUE, minZ = Integer.MAX_VALUE;
         int maxX = Integer.MIN_VALUE, maxY = Integer.MIN_VALUE, maxZ = Integer.MIN_VALUE;

@@ -114,6 +114,12 @@ final class StashLabeller {
 
         boolean moving();
 
+        /** The walk has left the stash area it started in, plus the margin. */
+        boolean leftArea();
+
+        /** Chest, trapped chest or barrel, for messages. */
+        String blockName(Box box);
+
         void pause(int ticks);
 
         /** Closes the container window that is open, if it is one of ours. */
@@ -735,6 +741,10 @@ final class StashLabeller {
             step = resume != null ? resume : Step.Hold;
             resume = null;
             stepTicks = 0;
+            return;
+        }
+        if (owner.leftArea()) {
+            fail(String.format("Skipping the %s at [%d, %d, %d]: the way there leaves the stash area.", owner.blockName(box), box.pos.getX(), box.pos.getY(), box.pos.getZ()));
             return;
         }
         if (!owner.walk()) {

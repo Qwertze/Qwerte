@@ -7,6 +7,7 @@ import com.porter.qwerte.stash.Stash;
 import com.porter.qwerte.stash.Stash.Box;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.render.Render2DEvent;
+import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
@@ -120,6 +121,13 @@ public class StashOverlay extends Module {
 
     private Stash stash() {
         return Modules.get().get(StashSorter.class).currentStash();
+    }
+
+    @EventHandler
+    private void onRender3D(Render3DEvent event) {
+        // stash-sorter draws it itself while it is on
+        StashSorter sorter = Modules.get().get(StashSorter.class);
+        if (!sorter.isActive()) sorter.drawArea(event);
     }
 
     @EventHandler

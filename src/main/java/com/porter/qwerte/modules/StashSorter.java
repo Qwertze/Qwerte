@@ -35,6 +35,7 @@ import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
 import meteordevelopment.meteorclient.utils.Utils;
+import meteordevelopment.meteorclient.utils.misc.input.Input;
 import meteordevelopment.meteorclient.utils.player.ChatUtils;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
@@ -42,9 +43,12 @@ import meteordevelopment.meteorclient.utils.player.Rotations;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
 import meteordevelopment.meteorclient.utils.world.BlockUtils;
 import meteordevelopment.orbit.EventHandler;
+import net.minecraft.client.KeyMapping;
 import net.minecraft.client.gui.screens.inventory.AbstractContainerScreen;
+import it.unimi.dsi.fastutil.longs.LongOpenHashSet;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.core.component.DataComponentMap;
 import net.minecraft.core.component.DataComponents;
 import net.minecraft.core.registries.BuiltInRegistries;
@@ -56,13 +60,16 @@ import net.minecraft.world.entity.decoration.ArmorStand;
 import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.inventory.AbstractContainerMenu;
 import net.minecraft.world.inventory.ChestMenu;
+import net.minecraft.world.inventory.ClickType;
 import net.minecraft.world.inventory.ShulkerBoxMenu;
 import net.minecraft.world.item.Item;
 import net.minecraft.world.item.Items;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.BarrelBlock;
 import net.minecraft.world.level.block.ChestBlock;
+import net.minecraft.world.level.block.TrappedChestBlock;
 import net.minecraft.world.level.block.ShulkerBoxBlock;
 import net.minecraft.world.level.block.StandingSignBlock;
 import net.minecraft.world.level.block.WallHangingSignBlock;
@@ -130,7 +137,9 @@ public class StashSorter extends Module {
         Off("Off"),
         Exclude("Exclude"),
         DropOff("Drop-off"),
-        CompactSkip("Compact skip");
+        CompactSkip("Compact skip"),
+        Corner1("Area corner 1"),
+        Corner2("Area corner 2");
 
         private final String title;
 
@@ -161,6 +170,13 @@ public class StashSorter extends Module {
         .build()
     );
 
+    private final Setting<Boolean> safeWalk = sgGeneral.add(new BoolSetting.Builder()
+        .name("safe-walk")
+        .description("While the sorter walks, Baritone never parkours, never jumps off or falls more than one block, and the sorter sneaks at ledges with a drop of 2 or more blocks. A container with no such way to it is skipped.")
+        .defaultValue(true)
+        .build()
+    );
+
     private final Setting<Mode> mode = sgGeneral.add(new EnumSetting.Builder<Mode>()
         .name("mode")
         .description("Tiers: filled shulkers, empty shulkers, 64-stackables, 16-stackables, then singles, filling the nearest containers first. Signs: each item goes to the container whose signs describe it best.")
@@ -170,7 +186,7 @@ public class StashSorter extends Module {
 
     private final Setting<Pick> pick = sgGeneral.add(new EnumSetting.Builder<Pick>()
         .name("pick")
-        .description("Right-click containers to mark them. Exclude: never sorted into or out of. Drop-off: emptied into the stash, for others to drop items in. Compact skip: never used to gather stacks or shulkers for compacting. Right-click again to unmark. Works while the module is off.")
+        .description("Right-click containers to mark them. Exclude: never sorted into or out of. Drop-off: emptied into the stash, for others to drop items in. Compact skip: never used to gather stacks or shulkers for compacting. Right-click again to unmark. Area corner 1 and 2: the block you right-click becomes that corner of the stash perimeter. Works while the module is off.")
         .defaultValue(Pick.Off)
         .build()
     );
@@ -459,6 +475,13 @@ public class StashSorter extends Module {
         .build()
     );
 
+    private final Setting<SettingColor> areaColor = sgRender.add(new ColorSetting.Builder()
+        .name("area-color")
+        .description("The outline of the stash perimeter, drawn while stash-sorter or stash-overlay is on.")
+        .defaultValue(new SettingColor(80, 255, 120, 255))
+        .build()
+    );
+
     private final Setting<SettingColor> workColor = sgRender.add(new ColorSetting.Builder()
         .name("work-color")
         .description("The container being worked on.")
@@ -510,7 +533,7 @@ public class StashSorter extends Module {
         Pattern.compile("^(\\w{3,16}) -> (?:me|you): (.+)$")
     };
 
-    private enum Job { Survey, Take, Deposit, Dump, Fetch, Clean, Fill, Compact, KitTake, KitUnpack, KitFill, FetchSigns, Label, Gather, Ground }
+    private enum Job { Survey, Take, Deposit, Dump, Fetch, Clean, Fill, Compact, KitTake, KitUnpack, KitFill, FetchSigns, Label, Gather, Ground, Explore, Unbundle }
 
     private enum Step { Walking, Opening, Working }
 
@@ -657,7 +680,7 @@ public class StashSorter extends Module {
 
         @Override
         public boolean walk() {
-            return walk.get() && BARITONE;
+            return walkOn();
         }
 
         @Override
@@ -721,9 +744,7 @@ public class StashSorter extends Module {
         @Override
         public void walkTo(BlockPos pos) {
             if (!BARITONE) return;
-            BaritoneHelper.protect(List.of());
-            usedBaritone = true;
-            setGoal(BaritoneHelper.moveNear(pos, 0));
+            walkNear(pos, 0);
         }
 
         @Override
@@ -734,6 +755,16 @@ public class StashSorter extends Module {
         @Override
         public boolean moving() {
             return BARITONE && BaritoneHelper.isMoving();
+        }
+
+        @Override
+        public boolean leftArea() {
+            return StashSorter.this.leftArea();
+        }
+
+        @Override
+        public String blockName(Box box) {
+            return StashSorter.this.blockName(box);
         }
 
         @Override
@@ -806,7 +837,7 @@ public class StashSorter extends Module {
 
         @Override
         public boolean drivingInput() {
-            return labeller.drivingInput();
+            return labeller.drivingInput() || ledgeSneaking;
         }
 
         @Override
@@ -842,6 +873,26 @@ public class StashSorter extends Module {
     private int moved;
     // Containers read by surveys since the last summary, for scan-only mode
     private int scanned;
+
+    // The stash perimeter: chunk columns seen loaded since it was set, the ones that couldn't be reached, and the trip in
+    // hand. Walking inside it is allowed, and the sorter explores it so its chunks load
+    private final LongOpenHashSet exploredChunks = new LongOpenHashSet();
+    private final LongOpenHashSet exploreSkipped = new LongOpenHashSet();
+    private boolean exploring, exploreRan, areaDirty;
+    private int exploreRunStart;
+    private static final int EXPLORE_RUN_LIMIT = 20 * 60 * 30;
+    private int exploreStanding;
+    private long exploreTarget;
+    private int exploreX, exploreZ;
+    private int exploreTicks, exploreIssue, exploreBestTick;
+    private double exploreBest;
+    private boolean walkInside, baritoneWarned;
+    // Containers already reported as impossible to reach without breaking or placing blocks
+    private final Set<BlockPos> unreachableReported = new HashSet<>();
+    private static final int EXPLORE_STANDING = 40;
+    private static final int EXPLORE_TIMEOUT = 20 * 40;
+    private static final int EXPLORE_STUCK = 20 * 15;
+    private static final int AREA_MARGIN = 2;
 
     // Picking up what other players left on the ground
     private final GroundCollector ground = new GroundCollector(new GroundCollector.Owner() {
@@ -888,9 +939,7 @@ public class StashSorter extends Module {
         @Override
         public void walkTo(BlockPos pos) {
             if (!BARITONE) return;
-            BaritoneHelper.protect(List.of());
-            usedBaritone = true;
-            setGoal(BaritoneHelper.moveNear(pos, 0));
+            walkNear(pos, 0);
         }
 
         @Override
@@ -900,12 +949,12 @@ public class StashSorter extends Module {
 
         @Override
         public void confine() {
-            if (BARITONE) BaritoneHelper.confine();
+            // Every walk of the sorter's confines Baritone itself, see walkNear
         }
 
         @Override
         public void unconfine() {
-            if (BARITONE) BaritoneHelper.unconfine();
+            if (BARITONE && ourGoal == null) BaritoneHelper.unconfine();
         }
 
         @Override
@@ -1328,6 +1377,8 @@ public class StashSorter extends Module {
     public void onActivate() {
         job = null;
         target = null;
+        breakRetries = 0;
+        brokenSince = -1;
         moved = 0;
         wait = 0;
         idle = false;
@@ -1338,9 +1389,11 @@ public class StashSorter extends Module {
         gate = Gate.Running;
         ownedMenu = null;
         ourGoal = null;
+        if (BARITONE) BaritoneHelper.unconfine();
         jobInterruptions = 0;
         returnTo = null;
         tierBoxes.clear();
+        tiesReported.clear();
         handle = null;
         packTried.clear();
         compactor.reset();
@@ -1353,6 +1406,7 @@ public class StashSorter extends Module {
         kitBuilder.reset();
         collectedSlot = -1;
         scanned = 0;
+        unbundleBlocked.clear();
         ground.abort();
 
         // Scan-only never carries anything, so there are no slots to find
@@ -1385,28 +1439,13 @@ public class StashSorter extends Module {
                 stash.markDirty();
             }
         }
+        // Everything given up on or unexplored before gets another try
+        forgetExploration();
         orderBoxes();
         checkOrphans();
 
-        long sortable = stash.boxes.stream().filter(b -> !b.excluded && !b.dropOff).count();
-        if (!sortItems.get()) {
-            if (stash.boxes.isEmpty()) {
-                error("Found no containers within %d blocks.", radius.get());
-                toggle();
-                return;
-            }
-        }
-        else if (sortable < 2) {
-            error("Found %d container%s to sort within %d blocks, need at least 2.", sortable, sortable == 1 ? "" : "s", radius.get());
-            toggle();
-            return;
-        }
-
-        if (sortItems.get() && mode.get() == Mode.Signs && stash.boxes.stream().allMatch(b -> b.labels.isEmpty())) {
-            error("None of the containers have signs on them. Put signs on them, or use Tiers mode.");
-            toggle();
-            return;
-        }
+        // With a perimeter the containers come from exploring it, and the checks wait until that is done
+        if (!stash.hasArea() && !checkStash()) return;
 
         int unknown = stash.boxes.size() - stash.knownCount();
         if (!sortItems.get()) info("Stash \"%s\": %d containers, scan only: reading %d unknown or stale ones, then watching for changes.", stash.name, stash.boxes.size(), unknown);
@@ -1427,7 +1466,10 @@ public class StashSorter extends Module {
         ownedMenu = null;
         gate = Gate.Running;
         labeller.deactivate();
+        ledgeGuard(false);
         ground.abort();
+        // Emptying a bundle: whatever is on the cursor goes into a carry slot
+        if (job == Job.Unbundle && mc.player != null) finishUnbundle();
 
         if (usedBaritone) {
             releaseGoal();
@@ -1520,6 +1562,8 @@ public class StashSorter extends Module {
         // What else is using the client, every tick: nothing of ours goes on while it's anything
         StashYield.Reason foreign = yielder.check();
         foreignNow = foreign != null;
+        // The sorter has the controls while it walks or works; a ledge with a drop gets a sneak, which is let go of otherwise
+        ledgeGuard(gate == Gate.Running && foreign == null && standingWork());
         switch (gate) {
             case Yielding -> {
                 if (cleanupStep()) gate = Gate.Waiting;
@@ -1550,6 +1594,19 @@ public class StashSorter extends Module {
             releaseDeferred();
             applyStale();
             applySignChanges();
+            // The perimeter changed while a job was under way: containers outside it go, the ones inside come in
+            if (areaDirty) applyArea();
+            // Chunks of the perimeter that loaded since, with containers in them
+            if (ticks % 100 == 0 && stash.hasArea()) {
+                int added = scanArea();
+                // Containers that are gone, where the chunk is loaded to tell
+                boolean gone = stash.boxes.removeIf(box -> mc.level.isLoaded(box.pos) && !isContainer(box.pos));
+                if (gone) stash.markDirty();
+                if (added > 0 || gone) {
+                    version++;
+                    idle = false;
+                }
+            }
             // Scan-only was switched off: there are carry slots to find now
             if (sortItems.get() && carry.isEmpty()) {
                 if (!pickCarrySlots()) {
@@ -1576,6 +1633,14 @@ public class StashSorter extends Module {
         }
         if (job == Job.Ground) {
             ground.tick();
+            return;
+        }
+        if (job == Job.Explore) {
+            exploreTick();
+            return;
+        }
+        if (job == Job.Unbundle) {
+            unbundleTick();
             return;
         }
         if (job == Job.Label) {
@@ -1646,7 +1711,7 @@ public class StashSorter extends Module {
     private boolean ourMenu(AbstractContainerMenu menu) {
         if (menu == null || mc.player == null || menu == mc.player.inventoryMenu) return false;
         if (menu == ownedMenu) return true;
-        if (job == null || job == Job.Ground) return false;
+        if (job == null || job == Job.Ground || job == Job.Explore || job == Job.Unbundle) return false;
         // A chest that opens while a sign is going up is the click's doing, and ours to close
         if (job == Job.Label) return labeller.ownsChest(menu);
         if (handle != null) return handle == Handle.Open && menu instanceof ShulkerBoxMenu;
@@ -1678,11 +1743,121 @@ public class StashSorter extends Module {
         if (BARITONE && ourGoal != null) BaritoneHelper.releaseOurs((baritone.api.pathing.goals.Goal) ourGoal);
         ourGoal = null;
         releaseTick = ticks;
+        // Baritone gets its break and place settings back the moment our walk is over
+        if (BARITONE) BaritoneHelper.unconfine();
     }
 
     private void setGoal(Object goal) {
         ourGoal = goal;
         goalTick = ticks;
+    }
+
+    /**
+     * Walks to within {@code range} blocks of a position with our own Baritone goal. Every walk the sorter makes goes
+     * through here, with Baritone not allowed to break or place blocks for as long as the goal is ours: it never
+     * digs or bridges its way to a destination. {@link #releaseGoal()} gives the settings back.
+     */
+    private void walkNear(BlockPos pos, int range) {
+        if (!BARITONE) return;
+        BaritoneHelper.protect(List.of());
+        usedBaritone = true;
+        BaritoneHelper.confine(safeWalk.get());
+        if (ourGoal == null) walkInside = stash != null && stash.hasArea() && stash.inArea(mc.player.getX(), mc.player.getY(), mc.player.getZ(), AREA_MARGIN);
+        setGoal(BaritoneHelper.moveNear(pos, range));
+    }
+
+    /**
+     * The same walk to a column, at any height: for places whose chunk isn't loaded yet.
+     */
+    private void walkXZ(int x, int z) {
+        if (!BARITONE) return;
+        BaritoneHelper.protect(List.of());
+        usedBaritone = true;
+        BaritoneHelper.confine(safeWalk.get());
+        if (ourGoal == null) walkInside = stash != null && stash.hasArea() && stash.inArea(mc.player.getX(), mc.player.getY(), mc.player.getZ(), AREA_MARGIN);
+        setGoal(BaritoneHelper.moveXZ(x, z));
+    }
+
+    /**
+     * Our walk has left the stash area it started in (plus the margin), by a way that is not to be taken.
+     */
+    private boolean leftArea() {
+        return ourGoal != null && walkInside && stash != null && stash.hasArea()
+            && !stash.inArea(mc.player.getX(), mc.player.getY(), mc.player.getZ(), AREA_MARGIN);
+    }
+
+    // Ledge guard
+
+    private boolean ledgeSneaking;
+
+    /**
+     * The sorter is standing still at its work with a window open or a click in the inventory: not while Baritone walks,
+     * and never at the clicks that open or use something in the world (the container, the shulker, the sign), which
+     * are made with the key up.
+     */
+    private boolean standingWork() {
+        if (ourGoal != null) return false;
+        if (handle != null) return handle == Handle.Work;
+        if (job == null) return false;
+        return switch (job) {
+            case Unbundle -> true;
+            case Label, Ground, Explore -> false;
+            default -> step == Step.Working;
+        };
+    }
+
+    /**
+     * While the sorter has the controls (walking, or standing working), sneaks at the edge of a block when the drop on
+     * that side is two blocks or more, so a push or a slip can't take it off. Let go as soon as the feet are 0.3 blocks
+     * or more from every such edge, or the sorter doesn't have the controls: the key goes back to how it is physically.
+     */
+    private void ledgeGuard(boolean controlling) {
+        boolean want = controlling && safeWalk.get() && mc.player != null && mc.level != null && nearDrop();
+        KeyMapping key = mc.options.keyShift;
+        if (want && !ledgeSneaking) {
+            ledgeSneaking = true;
+            key.setDown(true);
+        }
+        else if (!want && ledgeSneaking) {
+            ledgeSneaking = false;
+            key.setDown(Input.isPressed(key));
+        }
+    }
+
+    /**
+     * The feet are within 0.3 blocks of an edge of the block stood on, with a drop of 2 or more blocks beyond it: no solid
+     * block in the two cells below the neighbouring cell (the cell beside the feet). Corners are checked diagonally.
+     */
+    private boolean nearDrop() {
+        if (!mc.player.onGround() || mc.player.isInWater() || mc.player.getAbilities().flying) return false;
+
+        BlockPos feet = mc.player.blockPosition();
+        double fx = mc.player.getX() - feet.getX(), fz = mc.player.getZ() - feet.getZ();
+        int dx = fx < LEDGE ? -1 : fx > 1 - LEDGE ? 1 : 0;
+        int dz = fz < LEDGE ? -1 : fz > 1 - LEDGE ? 1 : 0;
+        if (dx == 0 && dz == 0) return false;
+
+        if (dx != 0 && drops(feet.offset(dx, 0, 0))) return true;
+        if (dz != 0 && drops(feet.offset(0, 0, dz))) return true;
+        return dx != 0 && dz != 0 && drops(feet.offset(dx, 0, dz));
+    }
+
+    private static final double LEDGE = 0.3;
+
+    private boolean drops(BlockPos beside) {
+        return !solid(beside.below()) && !solid(beside.below(2));
+    }
+
+    private boolean solid(BlockPos pos) {
+        // What isn't loaded is no drop to guard against
+        return !mc.level.isLoaded(pos) || !mc.level.getBlockState(pos).getCollisionShape(mc.level, pos).isEmpty();
+    }
+
+    /**
+     * The sorter may walk: Baritone is there, and the walk setting is on or a perimeter is set (which implies it).
+     */
+    private boolean walkOn() {
+        return BARITONE && (walk.get() || (stash != null && stash.hasArea()));
     }
 
     /**
@@ -1694,6 +1869,7 @@ public class StashSorter extends Module {
         cleanupTries = 0;
         wait = 0;
         releaseGoal();
+        ledgeGuard(false);
         if (job == Job.Label) labeller.yielded();
         if (job != null) {
             yielder.interrupted();
@@ -1704,6 +1880,8 @@ public class StashSorter extends Module {
             ground.abort();
             job = null;
         }
+        // Exploring carries on from the chunks still unseen
+        if (job == Job.Explore || job == Job.Unbundle) job = null;
         if (stash.isDirty()) stash.save();
         yielder.startWaiting(reason);
     }
@@ -1819,16 +1997,19 @@ public class StashSorter extends Module {
             return;
         }
 
-        if (!(walk.get() && BARITONE) || handleTicks > WALK_TIMEOUT) {
+        if (leftArea()) {
+            abandonShulker("Skipping the shulker box at " + at(placed) + ": the way there leaves the stash area.");
+            return;
+        }
+
+        if (!walkOn() || handleTicks > WALK_TIMEOUT) {
             abandonShulker("Couldn't get back to the shulker I put down at " + placed.toShortString() + ".");
             return;
         }
 
         boolean idleNow = handleTicks > PATH_GRACE_TICKS && !BaritoneHelper.isMoving();
         if (handleTicks == 1 || (idleNow && handleTicks % 40 == 0)) {
-            BaritoneHelper.protect(List.of());
-            usedBaritone = true;
-            setGoal(BaritoneHelper.moveNear(placed, 2));
+            walkNear(placed, 2);
         }
     }
 
@@ -1950,6 +2131,10 @@ public class StashSorter extends Module {
     }
 
     private boolean pickJob() {
+        // With a perimeter, its chunks are loaded first, so its containers are known before anything is sorted
+        if (startExplore()) return true;
+        if (!isActive()) return false;
+
         Box unread = nearest(stash.boxes.stream().filter(b -> !b.known() && !b.unreachable && !failedSurvey.contains(b) && !signPending(b)).toList());
         if (unread != null) return start(Job.Survey, unread);
 
@@ -1984,6 +2169,9 @@ public class StashSorter extends Module {
             finishSorting();
             return false;
         }
+
+        // A bundle with things in it is emptied first, its contents are then carried like anything else
+        if (startUnbundle()) return true;
 
         // A kit being built carries on until it's finished or given up on
         if (kitBuilder.active()) {
@@ -2096,6 +2284,162 @@ public class StashSorter extends Module {
 
         finishSorting();
         return false;
+    }
+
+    // Bundles
+
+    private int unbundleSlot = -1, unbundleTaken, unbundleStalls, unbundleSize;
+    private boolean unbundleClicked;
+    private final Map<Integer, Integer> unbundleBlocked = new HashMap<>();
+    private int unbundleStartSize;
+    private static final int UNBUNDLE_BLOCK_TICKS = 20 * 30;
+
+    private static boolean isBundle(ItemStack stack) {
+        return !stack.isEmpty() && stack.has(DataComponents.BUNDLE_CONTENTS);
+    }
+
+    /**
+     * A bundle with something in it.
+     */
+    private static boolean fullBundle(ItemStack stack) {
+        if (!isBundle(stack)) return false;
+        var contents = stack.get(DataComponents.BUNDLE_CONTENTS);
+        return contents != null && !contents.isEmpty();
+    }
+
+    private static int bundleSize(ItemStack stack) {
+        var contents = stack.get(DataComponents.BUNDLE_CONTENTS);
+        return contents == null ? 0 : contents.size();
+    }
+
+    /**
+     * Where an empty bundle goes: a container signed for bundles, else one signed for shulkers or containers. Empty when
+     * there is none, and the usual rules apply.
+     */
+    private List<Box> bundleHomes(ItemStack bundle) {
+        List<Box> signed = new ArrayList<>();
+        for (Box box : stash.boxes) {
+            if (!box.sortable() || box.dropOff || isKitBox(box)) continue;
+            if (box.labels.stream().anyMatch(label -> Categories.normalize(label).contains("bundle"))) signed.add(box);
+        }
+        if (!signed.isEmpty()) return signed;
+        return bestSigned(Items.SHULKER_BOX.getDefaultInstance());
+    }
+
+    /**
+     * A bundle with things in it, in a carry slot, is emptied into the other carry slots before anything else is done with
+     * it. Needs the plain inventory (no screen, nothing on the cursor) and a free carry slot for what comes out.
+     * @return true when emptying has begun
+     */
+    private boolean startUnbundle() {
+        if (!sortItems.get()) return false;
+        if (mc.screen != null || mc.player.containerMenu != mc.player.inventoryMenu || !mc.player.containerMenu.getCarried().isEmpty()) return false;
+        if (freeCarrySlot() == -1) return false;
+
+        Set<Integer> setAside = compactor.reserved();
+        for (int slot : carriedSlots()) {
+            ItemStack stack = mc.player.getInventory().getItem(slot);
+            if (!fullBundle(stack) || labeller.reservedSlot(slot) || setAside.contains(slot) || ticks < unbundleBlocked.getOrDefault(slot, -1)) continue;
+
+            unbundleSlot = slot;
+            unbundleTaken = 0;
+            unbundleStalls = 0;
+            unbundleClicked = false;
+            unbundleSize = unbundleStartSize = bundleSize(stack);
+            stashHeld.put(slot, stack.copy());
+
+            job = Job.Unbundle;
+            target = null;
+            handle = null;
+            actions = 0;
+            jobCounted = false;
+            stepTicks = 0;
+            jobInterruptions = 0;
+            startSigSet = endSigSet = false;
+            settled = false;
+            openPos = null;
+            openMenuBefore = null;
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Takes the contents of the bundle out one stack at a time. Right-clicking a bundle in the inventory with an empty
+     * cursor puts the next stack in it on the cursor (the same in 1.21.4 and 1.21.11), and a left click on a free carry slot
+     * puts that stack down. The bundle never leaves its slot, so there's nothing to put back.
+     */
+    private void unbundleTick() {
+        stepTicks++;
+        lastOwnAct = ticks;
+        AbstractContainerMenu menu = mc.player.inventoryMenu;
+        if (mc.screen != null || mc.player.containerMenu != menu) {
+            finishUnbundle();
+            return;
+        }
+
+        ItemStack bundle = mc.player.getInventory().getItem(unbundleSlot);
+        ItemStack cursor = menu.getCarried();
+        if (!isBundle(bundle) || stepTicks > 20 * 30) {
+            finishUnbundle();
+            return;
+        }
+
+        // A stack is out: down into a free carry slot
+        if (!cursor.isEmpty()) {
+            int free = freeCarrySlot();
+            if (free == -1) {
+                // Nowhere to put it: back into the bundle (a left click on a bundle with a stack on the cursor)
+                bundleClick(unbundleSlot, 0);
+                finishUnbundle();
+                return;
+            }
+            stashHeld.put(free, cursor.copy());
+            bundleClick(free, 0);
+            unbundleTaken++;
+            unbundleClicked = false;
+            wait = delay.get();
+            return;
+        }
+
+        if (!fullBundle(bundle) || freeCarrySlot() == -1) {
+            finishUnbundle();
+            return;
+        }
+
+        // The last take got nothing out of the bundle: the server isn't letting it
+        int size = bundleSize(bundle);
+        boolean noProgress = (unbundleClicked && size >= unbundleSize) || (unbundleTaken > 0 && size >= unbundleStartSize);
+        if (noProgress && ++unbundleStalls > 2) {
+            finishUnbundle();
+            return;
+        }
+        unbundleSize = size;
+        unbundleClicked = true;
+        bundleClick(unbundleSlot, 1);
+        wait = delay.get();
+    }
+
+    /**
+     * A click on a carry slot in the player inventory menu: button 0 is a left click, 1 a right click.
+     */
+    private void bundleClick(int slot, int button) {
+        AbstractContainerMenu menu = mc.player.inventoryMenu;
+        mc.gameMode.handleInventoryMouseClick(menu.containerId, slot < 9 ? 36 + slot : slot, button, ClickType.PICKUP, mc.player);
+        yielder.inventoryChangedByUs();
+    }
+
+    private void finishUnbundle() {
+        ItemStack bundle = unbundleSlot >= 0 ? mc.player.getInventory().getItem(unbundleSlot) : ItemStack.EMPTY;
+        if (isBundle(bundle)) stashHeld.put(unbundleSlot, bundle.copy());
+        if (unbundleTaken > 0 && !fullBundle(bundle)) info("Emptied a bundle: %d stacks taken out.", unbundleTaken);
+        if (fullBundle(bundle) && unbundleSlot >= 0) unbundleBlocked.put(unbundleSlot, ticks + UNBUNDLE_BLOCK_TICKS);
+        // A stack still on the cursor, with no screen to take it: into a carry slot
+        if (mc.screen == null && mc.player.containerMenu == mc.player.inventoryMenu && !mc.player.containerMenu.getCarried().isEmpty()) returnCursor();
+        unbundleSlot = -1;
+        if (job == Job.Unbundle) job = null;
+        wait = delay.get();
+        moved++;
     }
 
     // Building kits
@@ -2257,7 +2601,12 @@ public class StashSorter extends Module {
         ItemStack[] inside = inside(shulker);
         for (int i = 0; i < inside.length; i++) {
             ItemStack s = inside[i];
-            if (s == null || s.isEmpty() || s.is(main.getItem())) continue;
+            if (s == null || s.isEmpty()) continue;
+            if (fullBundle(s)) {
+                out.add(i);
+                continue;
+            }
+            if (s.is(main.getItem())) continue;
             if (!bestSigned(s).isEmpty()) out.add(i);
         }
         return out;
@@ -2324,6 +2673,8 @@ public class StashSorter extends Module {
         fillKey = fill;
         handle = Handle.Place;
         handleTicks = 0;
+        breakRetries = 0;
+        brokenSince = -1;
         placed = null;
         placedConfirmed = false;
         actions = 0;
@@ -2564,7 +2915,7 @@ public class StashSorter extends Module {
 
         for (int i = 0; i < 27; i++) {
             ItemStack s = menu.getSlot(i).getItem();
-            if (s.isEmpty() || s.is(mainItem) || bestSigned(s).isEmpty()) continue;
+            if (s.isEmpty() || (!fullBundle(s) && (s.is(mainItem) || bestSigned(s).isEmpty()))) continue;
             stashHeld.put(into, s.copy());
             InvUtils.move().fromId(i).toId(inventoryToMenu(into, 27));
             moved++;
@@ -2618,7 +2969,12 @@ public class StashSorter extends Module {
             return;
         }
 
+        // The break is reported as soon as the block looks gone here, but the server can still refuse it and put the
+        // shulker back: it only counts as broken once the spot has stayed clear for a moment
         if (!shulkerAt(placed)) {
+            if (brokenSince < 0) brokenSince = ticks;
+            if (ticks - brokenSince < BREAK_SETTLE_TICKS) return;
+            brokenSince = -1;
             if (pickaxeSwapped) {
                 InvUtils.swapBack();
                 pickaxeSwapped = false;
@@ -2627,6 +2983,7 @@ public class StashSorter extends Module {
             handleTicks = 0;
             return;
         }
+        brokenSince = -1;
 
         // Breaking it needs a free slot to pick it up into: otherwise it would end up on the ground
         if (!freeInventorySlot()) {
@@ -2650,8 +3007,36 @@ public class StashSorter extends Module {
         BlockUtils.breakBlock(placed, true);
     }
 
+    private static final int BREAK_SETTLE_TICKS = 10;
+    private static final int MAX_BREAK_RETRIES = 3;
+    private int breakRetries;
+    private int brokenSince = -1;
+
+    private static String fmtPos(BlockPos pos) {
+        return "[" + pos.getX() + ", " + pos.getY() + ", " + pos.getZ() + "]";
+    }
+
+    private boolean shulkerItemNearby() {
+        for (ItemEntity e : mc.level.getEntitiesOfClass(ItemEntity.class, new AABB(placed).inflate(4))) {
+            if (Utils.isShulker(e.getItem().getItem())) return true;
+        }
+        return false;
+    }
+
     private void handleCollect() {
         breakTicks = 0;
+        // The server put the shulker back: it is broken again rather than looked for on the ground, where it never was
+        if (shulkerAt(placed) && !shulkerItemNearby()) {
+            if (++breakRetries > MAX_BREAK_RETRIES) {
+                abandonShulker("Couldn't break the shulker at " + fmtPos(placed) + ", the server keeps putting it back. It's still standing there.");
+                return;
+            }
+            warning("The shulker at %s is still standing, the server didn't let it break. Breaking it again (%d/%d).", fmtPos(placed), breakRetries, MAX_BREAK_RETRIES);
+            brokenSince = -1;
+            handle = Handle.Break;
+            handleTicks = 0;
+            return;
+        }
         // A block that turns up after all (a late update) is worked with again
         if (shulkerAt(placed)) {
             handle = Handle.Open;
@@ -2713,8 +3098,13 @@ public class StashSorter extends Module {
             return;
         }
 
+        if (leftArea()) {
+            abandonShulker("Skipping the shulker box at " + at(placed) + ": the way there leaves the stash area.");
+            return;
+        }
+
         // Dropped out of reach: walk over it
-        if (handleTicks >= 40 && handleTicks % 200 == 40 && walk.get() && BARITONE) {
+        if (handleTicks >= 40 && handleTicks % 200 == 40 && walkOn()) {
             ItemEntity drop = null;
             for (ItemEntity e : mc.level.getEntitiesOfClass(ItemEntity.class, new AABB(placed).inflate(4))) {
                 if (Utils.isShulker(e.getItem().getItem())) {
@@ -2723,9 +3113,7 @@ public class StashSorter extends Module {
                 }
             }
             if (drop != null) {
-                BaritoneHelper.protect(List.of());
-                usedBaritone = true;
-                setGoal(BaritoneHelper.moveNear(drop.blockPosition(), 0));
+                walkNear(drop.blockPosition(), 0);
             }
         }
     }
@@ -2742,6 +3130,8 @@ public class StashSorter extends Module {
         handle = null;
         placed = null;
         placedConfirmed = false;
+        breakRetries = 0;
+        brokenSince = -1;
         lastOwnAct = ticks;
         restoreHotbar();
         if (pickaxeSwapped) {
@@ -2895,6 +3285,16 @@ public class StashSorter extends Module {
     private String unsafeBecause(BlockPos spot) {
         if (failedSpots.contains(spot)) return "placing there failed before";
         if (stash.boxAt(spot) != null) return "a stash container is there";
+        // What is dropped there when the shulker is broken has to be walkable to: floor under it, and open on two sides
+        // at least (our own side and one more), not a gap between containers
+        BlockPos floor = spot.below();
+        if (mc.level.getBlockState(floor).getCollisionShape(mc.level, floor).isEmpty()) return "there is no floor under it";
+        int open = 0;
+        for (Direction d : HORIZONTALS) {
+            BlockPos side = spot.relative(d);
+            if (mc.level.getBlockState(side).getCollisionShape(mc.level, side).isEmpty() && stash.boxAt(side) == null) open++;
+        }
+        if (open < 2) return "it is boxed in, an item dropped there could not be reached";
         // Another player or a mob whose box, a little wider than it is, overlaps the spot's cell blocks the place. Not the
         // player themselves, and not items, frames or armor stands
         if (!mc.level.getEntitiesOfClass(LivingEntity.class, new AABB(spot).inflate(0.3), e -> e != mc.player && !(e instanceof ArmorStand)).isEmpty()) {
@@ -2988,13 +3388,12 @@ public class StashSorter extends Module {
         if (inReach(box)) {
             step = Step.Opening;
         }
-        else if (walk.get() && BARITONE) {
-            BaritoneHelper.protect(List.of());
-            usedBaritone = true;
-            setGoal(BaritoneHelper.moveNear(box.pos, 2));
+        else if (walkOn()) {
+            walkNear(box.pos, 2);
             step = Step.Walking;
         }
         else {
+            if (stash.hasArea() && !BARITONE) warnNoBaritone();
             box.unreachable = true;
             job = null;
             target = null;
@@ -3082,6 +3481,15 @@ public class StashSorter extends Module {
             return;
         }
 
+        // Started inside the perimeter and now outside it: a way that leads out of the stash area isn't taken
+        if (walkInside && stash.hasArea() && !stash.inArea(mc.player.getX(), mc.player.getY(), mc.player.getZ(), AREA_MARGIN)) {
+            releaseGoal();
+            reportUnreachable(target, Cause.Area);
+            target.unreachable = true;
+            finishJob();
+            return;
+        }
+
         boolean stopped = stepTicks > PATH_GRACE_TICKS && !BaritoneHelper.isMoving();
         boolean ourGoalWasTaken = stopped && BARITONE && ourGoal != null && !BaritoneHelper.goalIs((baritone.api.pathing.goals.Goal) ourGoal);
         if (stopped || stepTicks > WALK_TIMEOUT) {
@@ -3100,6 +3508,7 @@ public class StashSorter extends Module {
                 wait = delay.get();
                 return;
             }
+            reportUnreachable(target, Cause.Path);
             target.unreachable = true;
             finishJob();
         }
@@ -3124,6 +3533,7 @@ public class StashSorter extends Module {
         }
 
         if (stepTicks > OPEN_TIMEOUT) {
+            reportUnreachable(target, Cause.Open);
             target.unreachable = true;
             finishJob();
             return;
@@ -3183,7 +3593,7 @@ public class StashSorter extends Module {
         }
 
         boolean busy = switch (job) {
-            case Survey, Clean, Fill, KitUnpack, KitFill, Label, Ground -> false;
+            case Survey, Clean, Fill, KitUnpack, KitFill, Label, Ground, Explore, Unbundle -> false;
             case FetchSigns -> labeller.fetchSignsOne(target, actions);
             case Gather -> compactor.gatherOne(target);
             case KitTake -> kitBuilder.takeOne(target);
@@ -3408,6 +3818,11 @@ public class StashSorter extends Module {
         for (int i = 0; i < source.contents.length; i++) {
             ItemStack stack = source.contents[i];
             if (stack.isEmpty() || !misplaced(stack, source)) continue;
+            // A bundle with things in it needs a slot for itself and one for what comes out
+            if (fullBundle(stack)) {
+                if (freeCarryCount() >= 2) return i;
+                continue;
+            }
             if (destinationsFor(stack).stream().anyMatch(b -> room.getOrDefault(b, 0) > 0)) return i;
             if (spare > 0) return i;
         }
@@ -3447,6 +3862,8 @@ public class StashSorter extends Module {
         for (int slot : carriedSlots()) {
             if (kitBuilder.holds(slot)) continue;
             ItemStack stack = mc.player.getInventory().getItem(slot);
+            // A bundle with things in it is emptied, never put away as it is
+            if (fullBundle(stack)) continue;
             if (!destinationsFor(stack).contains(target)) continue;
 
             if (canFit(stack)) {
@@ -3457,7 +3874,8 @@ public class StashSorter extends Module {
 
             for (int i = 0; i < size; i++) {
                 ItemStack here = target.contents[i];
-                if (here.isEmpty() || !misplaced(here, target) || ItemStack.isSameItemSameComponents(here, stack)) continue;
+                // A click of one stack on a bundle puts it in the bundle, and a bundle on a stack takes it in: never swapped
+                if (here.isEmpty() || isBundle(here) || isBundle(stack) || !misplaced(here, target) || ItemStack.isSameItemSameComponents(here, stack)) continue;
 
                 swapCarry = slot;
                 swapSlot = i;
@@ -3524,7 +3942,7 @@ public class StashSorter extends Module {
      */
     private boolean dumpOne() {
         for (int slot : carriedSlots()) {
-            if (kitBuilder.holds(slot) || !canFit(mc.player.getInventory().getItem(slot))) continue;
+            if (kitBuilder.holds(slot) || fullBundle(mc.player.getInventory().getItem(slot)) || !canFit(mc.player.getInventory().getItem(slot))) continue;
 
             InvUtils.shiftClick().slotId(inventoryToMenu(slot, target.contents.length));
             return true;
@@ -3598,6 +4016,12 @@ public class StashSorter extends Module {
     private List<Box> computeDestinations(ItemStack stack) {
         if (mode.get() == Mode.Tiers) return tierBoxes.getOrDefault(tier(stack), List.of());
 
+        // An empty bundle goes to a chest signed for bundles, else one signed for shulkers or containers
+        if (isBundle(stack)) {
+            List<Box> bundles = bundleHomes(stack);
+            if (!bundles.isEmpty()) return bundles;
+        }
+
         // A finished kit, or one part built with more than one kind of item, goes to the chest signed with its name.
         // With no such chest it's treated like any other shulker.
         Kits.Match kit = Kits.match(stack);
@@ -3646,7 +4070,28 @@ public class StashSorter extends Module {
             }
             if (score == best && score > 0) result.add(box);
         }
+        if (result.size() > 1) reportTie(stack, result);
         return result;
+    }
+
+    // Item id plus the tied containers' positions already reported as fitting two differently signed containers equally.
+    // Only cleared when the module is switched on again, so each tie is said once per run (or again when the tied set changes)
+    private final Set<String> tiesReported = new HashSet<>();
+
+    /**
+     * Two containers with different signs describe an item equally well: it goes to the nearest. Several containers with
+     * the same sign are no tie, that is just a category with more than one chest.
+     */
+    private void reportTie(ItemStack stack, List<Box> tied) {
+        Set<String> first = new HashSet<>(tied.getFirst().labels);
+        boolean different = false;
+        for (Box other : tied) if (!new HashSet<>(other.labels).equals(first)) different = true;
+        if (!different) return;
+        String key = idOf(stack) + "|" + tied.stream().map(b -> b.pos.toString()).sorted().collect(java.util.stream.Collectors.joining(";"));
+        if (tiesReported.add(key)) {
+            warning("%s fits %d containers with different signs equally well (%s), it goes to the nearest.", StackInfo.label(stack), tied.size(),
+                String.join(" / ", tied.stream().map(b -> b.labels.isEmpty() ? "?" : b.labels.getFirst()).distinct().toList()));
+        }
     }
 
     /**
@@ -3656,6 +4101,9 @@ public class StashSorter extends Module {
     private boolean misplaced(ItemStack stack, Box box) {
         // Nothing stays in a drop-off
         if (box.dropOff) return true;
+
+        // A bundle with things in it is taken out to be emptied, wherever it is
+        if (fullBundle(stack)) return true;
 
         // A kit, or part of one, in its own chest is where it belongs
         if (mode.get() == Mode.Signs) {
@@ -3748,7 +4196,7 @@ public class StashSorter extends Module {
         ItemStack[] c = box.contents;
         for (int i = 0; i < c.length; i++) {
             ItemStack a = c[i];
-            if (a.isEmpty() || a.getMaxStackSize() <= 1 || a.getCount() >= a.getMaxStackSize()) continue;
+            if (a.isEmpty() || isBundle(a) || a.getMaxStackSize() <= 1 || a.getCount() >= a.getMaxStackSize()) continue;
             for (int j = c.length - 1; j > i; j--) {
                 ItemStack b = c[j];
                 if (!b.isEmpty() && ItemStack.isSameItemSameComponents(a, b) && b.getCount() < b.getMaxStackSize()) return new int[] {i, j};
@@ -3832,6 +4280,8 @@ public class StashSorter extends Module {
         int r = radius.get(), h = height.get();
         int added = 0;
 
+        // With a perimeter, nothing outside it belongs to the stash
+        if (stash.hasArea() && stash.boxes.removeIf(box -> box.parts.stream().noneMatch(stash::inArea))) stash.markDirty();
         if (stash.boxes.removeIf(box -> mc.level.isLoaded(box.pos) && !isContainer(box.pos))) stash.markDirty();
 
         // A chest next to a saved one may have made it a double (or a double been halved): bring the parts up to date
@@ -3857,6 +4307,9 @@ public class StashSorter extends Module {
                 }
             }
         }
+
+        // The perimeter replaces radius and height: every container inside it, in the chunks that are loaded
+        if (stash.hasArea()) return added + scanArea();
 
         for (BlockPos p : BlockPos.betweenClosed(center.offset(-r, -h, -r), center.offset(r, h, r))) {
             if (!isContainer(p) || stash.boxAt(p) != null) continue;
@@ -3913,6 +4366,10 @@ public class StashSorter extends Module {
         if (!(mc.hitResult instanceof BlockHitResult hit) || hit.getType() != HitResult.Type.BLOCK) return false;
 
         BlockPos pos = hit.getBlockPos();
+        if (pick.get() == Pick.Corner1 || pick.get() == Pick.Corner2) {
+            setCorner(pick.get() == Pick.Corner1 ? 1 : 2, pos.immutable());
+            return true;
+        }
         if (!isContainer(pos)) {
             warning("That isn't a chest or barrel.");
             return true;
@@ -3945,6 +4402,386 @@ public class StashSorter extends Module {
         return true;
     }
 
+    // The stash perimeter
+
+    /**
+     * Makes the block the corner of the stash perimeter. The perimeter only applies once both corners are set.
+     */
+    private void setCorner(int which, BlockPos pos) {
+        if (ensureStash() == null) stash = new Stash(stashName.get(), Stash.currentServer());
+        // Corners set in another dimension don't go with this one
+        String dimension = Stash.currentDimension();
+        if (stash.hasCorners() || stash.corner1 != null || stash.corner2 != null) {
+            if (!stash.areaDimension.isEmpty() && !stash.areaDimension.equals(dimension)) {
+                stash.corner1 = null;
+                stash.corner2 = null;
+            }
+        }
+        BlockPos other = which == 1 ? stash.corner2 : stash.corner1;
+        if (other != null && Stash.tooBig(pos, other)) {
+            error("That area is %d\u00d7%d\u00d7%d, the largest allowed is %d\u00d7%d\u00d7%d (width \u00d7 height \u00d7 depth).",
+                Math.abs(pos.getX() - other.getX()) + 1, Math.abs(pos.getY() - other.getY()) + 1, Math.abs(pos.getZ() - other.getZ()) + 1,
+                Stash.MAX_X, Stash.MAX_Y, Stash.MAX_Z);
+            return;
+        }
+
+        if (which == 1) stash.corner1 = pos;
+        else stash.corner2 = pos;
+        stash.areaDimension = dimension;
+        stash.markDirty();
+        stash.save();
+
+        if (stash.hasArea()) {
+            info("Stash area set: %s.", stash.areaText());
+            areaChanged();
+        }
+        else info("Corner %d set at [%d, %d, %d]. Set corner %d to finish the stash area.", which, pos.getX(), pos.getY(), pos.getZ(), which == 1 ? 2 : 1);
+    }
+
+    private void clearArea() {
+        if (ensureStash() == null || (stash.corner1 == null && stash.corner2 == null)) {
+            info("There is no stash area set.");
+            return;
+        }
+        boolean applied = stash.hasArea();
+        stash.corner1 = null;
+        stash.corner2 = null;
+        stash.areaDimension = "";
+        stash.markDirty();
+        stash.save();
+        info("Stash area cleared, finding containers around you again.");
+        if (applied) areaChanged();
+    }
+
+    /**
+     * The perimeter was set or cleared: nothing counts as explored or unreachable any more, and an exploration under
+     * way ends at once. With the module on, dropping containers outside it, adding the ones inside and the new order wait
+     * until between jobs, so nothing being worked on changes under it.
+     */
+    private void areaChanged() {
+        forgetExploration();
+        if (job == Job.Explore) finishExplore();
+        if (isActive()) {
+            areaDirty = true;
+            version++;
+            idle = false;
+        }
+        else applyArea();
+    }
+
+    private void applyArea() {
+        areaDirty = false;
+        if (mc.player == null || mc.level == null || stash == null) return;
+        addNearbyBoxes();
+        orderBoxes();
+        stash.save();
+        version++;
+        idle = false;
+    }
+
+    /**
+     * Starts the exploration over, and forgets what went wrong: containers that could not be reached or opened, surveys
+     * and jobs given up on, so everything gets another try.
+     */
+    private void forgetExploration() {
+        exploredChunks.clear();
+        exploreSkipped.clear();
+        exploring = false;
+        exploreRan = false;
+        unreachableReported.clear();
+        failedSurvey.clear();
+        futile.clear();
+        noOpReported.clear();
+        cancelRetries.clear();
+        clearStalled();
+        if (stash != null) {
+            for (Box box : stash.boxes) {
+                box.unreachable = false;
+                box.labelFailed = false;
+            }
+        }
+    }
+
+    /**
+     * Adds the containers inside the perimeter in every chunk that is loaded, and notes those chunks as seen. Goes through
+     * the chunks' block entities directly.
+     * @return how many containers were added
+     */
+    private int scanArea() {
+        if (stash == null || !stash.hasArea() || mc.level == null) return 0;
+        BlockPos min = stash.areaMin(), max = stash.areaMax();
+        boolean withBarrels = barrels.get();
+        int added = 0;
+
+        for (int cx = min.getX() >> 4; cx <= max.getX() >> 4; cx++) {
+            for (int cz = min.getZ() >> 4; cz <= max.getZ() >> 4; cz++) {
+                if (!mc.level.hasChunk(cx, cz)) continue;
+                exploredChunks.add(ChunkPos.asLong(cx, cz));
+
+                for (BlockEntity entity : mc.level.getChunk(cx, cz).getBlockEntities().values()) {
+                    if (!(entity instanceof ChestBlockEntity || (withBarrels && entity instanceof BarrelBlockEntity))) continue;
+                    BlockPos pos = entity.getBlockPos();
+                    if (!stash.inArea(pos) || stash.boxAt(pos) != null) continue;
+                    stash.boxes.add(makeBox(pos.immutable()));
+                    added++;
+                }
+            }
+        }
+
+        if (added > 0) {
+            stash.markDirty();
+            orderBoxes();
+        }
+        return added;
+    }
+
+    private int columnsTouched() {
+        BlockPos min = stash.areaMin(), max = stash.areaMax();
+        return ((max.getX() >> 4) - (min.getX() >> 4) + 1) * ((max.getZ() >> 4) - (min.getZ() >> 4) + 1);
+    }
+
+    private List<Long> pendingChunks() {
+        List<Long> list = new ArrayList<>();
+        BlockPos min = stash.areaMin(), max = stash.areaMax();
+        for (int cx = min.getX() >> 4; cx <= max.getX() >> 4; cx++) {
+            for (int cz = min.getZ() >> 4; cz <= max.getZ() >> 4; cz++) {
+                long key = ChunkPos.asLong(cx, cz);
+                if (!exploredChunks.contains(key) && !exploreSkipped.contains(key)) list.add(key);
+            }
+        }
+        return list;
+    }
+
+    /** The middle of the part of the chunk column inside the perimeter, in X. */
+    private int columnX(long key) {
+        int cx = (int) (key & 0xFFFFFFFFL);
+        return (Math.max(stash.areaMin().getX(), cx * 16) + Math.min(stash.areaMax().getX(), cx * 16 + 15)) / 2;
+    }
+
+    /** The middle of the part of the chunk column inside the perimeter, in Z. */
+    private int columnZ(long key) {
+        int cz = (int) (key >>> 32);
+        return (Math.max(stash.areaMin().getZ(), cz * 16) + Math.min(stash.areaMax().getZ(), cz * 16 + 15)) / 2;
+    }
+
+    private void warnNoBaritone() {
+        if (baritoneWarned) return;
+        baritoneWarned = true;
+        warning("Baritone isn't installed, so I can't walk the stash area or explore it. Containers in loaded chunks are still used.");
+    }
+
+    /**
+     * The checks made when turning on: enough containers, and signs on some in Signs mode. With a perimeter they wait for
+     * the exploration, which is what finds the containers.
+     * @return false if the module was turned off for failing one
+     */
+    private boolean checkStash() {
+        long sortable = stash.boxes.stream().filter(b -> !b.excluded && !b.dropOff).count();
+        if (!sortItems.get()) {
+            if (stash.boxes.isEmpty()) {
+                error("Found no containers within %d blocks.", radius.get());
+                toggle();
+                return false;
+            }
+        }
+        else if (sortable < 2) {
+            error("Found %d container%s to sort within %d blocks, need at least 2.", sortable, sortable == 1 ? "" : "s", radius.get());
+            toggle();
+            return false;
+        }
+
+        if (sortItems.get() && mode.get() == Mode.Signs && stash.boxes.stream().allMatch(b -> b.labels.isEmpty())) {
+            error("None of the containers have signs on them. Put signs on them, or use Tiers mode.");
+            toggle();
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * With a perimeter set: walks to the nearest chunk column of it not seen loaded yet, so it loads and its containers
+     * can be added. The goal is the middle of the part of the column inside the perimeter, in X and Z only. The activation
+     * checks follow the exploration.
+     * @return true when a trip has begun
+     */
+    private boolean startExplore() {
+        if (stash == null || !stash.hasArea()) return false;
+        scanArea();
+        if (!BARITONE) {
+            warnNoBaritone();
+            return false;
+        }
+
+        if (!exploreRan) {
+            exploreRan = true;
+            exploreRunStart = ticks;
+            exploring = true;
+            info("Exploring the stash area: %d chunks to look at.", columnsTouched());
+        }
+        if (!exploring) return false;
+        // One run takes half an hour at the most: whatever is still unseen is given up on, and the run is reported
+        if (ticks - exploreRunStart > EXPLORE_RUN_LIMIT) {
+            for (long key : pendingChunks()) exploreSkipped.add(key);
+            info("Exploring the stash area took more than 30 minutes, carrying on with what was found.");
+        }
+
+        List<Long> pending = pendingChunks();
+        if (pending.isEmpty()) {
+            exploring = false;
+            orderBoxes();
+            stash.save();
+            long inside = stash.boxes.stream().filter(b -> b.parts.stream().anyMatch(stash::inArea)).count();
+            info("Explored the stash area: found %d containers (%d chunks couldn't be reached).", inside, exploreSkipped.size());
+            checkStash();
+            return false;
+        }
+
+        Vec3 here = mc.player.position();
+        long best = pending.getFirst();
+        double bestDistance = Double.MAX_VALUE;
+        for (long key : pending) {
+            double dx = columnX(key) - here.x, dz = columnZ(key) - here.z;
+            if (dx * dx + dz * dz < bestDistance) {
+                bestDistance = dx * dx + dz * dz;
+                best = key;
+            }
+        }
+
+        exploreTarget = best;
+        exploreX = columnX(best);
+        exploreZ = columnZ(best);
+        exploreTicks = 0;
+        exploreIssue = 0;
+        exploreStanding = 0;
+        exploreBest = Double.MAX_VALUE;
+        exploreBestTick = 0;
+
+        job = Job.Explore;
+        target = null;
+        handle = null;
+        actions = 0;
+        jobCounted = false;
+        stepTicks = 0;
+        jobInterruptions = 0;
+        startSigSet = endSigSet = false;
+        settled = false;
+        openPos = null;
+        openMenuBefore = null;
+        walkXZ(exploreX, exploreZ);
+        return true;
+    }
+
+    private void exploreTick() {
+        exploreTicks++;
+        if (stash == null || !stash.hasArea() || !BARITONE) {
+            finishExplore();
+            return;
+        }
+        if (exploreTicks % 5 == 0) scanArea();
+        // Done as soon as the chunk is loaded
+        if (exploredChunks.contains(exploreTarget)) {
+            finishExplore();
+            return;
+        }
+
+        Vec3 here = mc.player.position();
+        double distance = Math.sqrt((here.x - exploreX) * (here.x - exploreX) + (here.z - exploreZ) * (here.z - exploreZ));
+        if (distance < exploreBest - 1) {
+            exploreBest = distance;
+            exploreBestTick = exploreTicks;
+        }
+        exploreStanding = distance <= 2 ? exploreStanding + 1 : 0;
+
+        String why = null;
+        if (leftArea()) why = "the way there leaves the stash area";
+        else if (exploreTicks > EXPLORE_TIMEOUT) why = "it took longer than 40 seconds";
+        else if (exploreTicks - exploreBestTick > EXPLORE_STUCK) why = "no way closer for 15 seconds";
+        else if (exploreStanding >= EXPLORE_STANDING) why = "it is still not loaded at the spot";
+        if (why != null) {
+            exploreSkipped.add(exploreTarget);
+            int cx = (int) (exploreTarget & 0xFFFFFFFFL), cz = (int) (exploreTarget >>> 32);
+            if (safeWalk.get() && !why.startsWith("the way")) debug("Can't reach the chunk at %d, %d without breaking or placing blocks, jumping or falling, skipping it.", cx, cz);
+            else debug("Skipping the chunk at %d, %d: %s.", cx, cz, why);
+            finishExplore();
+            return;
+        }
+
+        // Baritone stopped short, told again
+        if (exploreTicks >= 10 && exploreTicks - exploreIssue >= 60 && !BaritoneHelper.isMoving()) {
+            exploreIssue = exploreTicks;
+            walkXZ(exploreX, exploreZ);
+        }
+    }
+
+    private void finishExplore() {
+        releaseGoal();
+        if (job == Job.Explore) job = null;
+        wait = delay.get();
+    }
+
+    // Containers that can't be got to
+
+    private static String at(BlockPos pos) {
+        return String.format("[%d, %d, %d]", pos.getX(), pos.getY(), pos.getZ());
+    }
+
+    /**
+     * What the block is called in messages: chest, trapped chest or barrel.
+     */
+    private String blockName(Box box) {
+        if (mc.level == null) return "chest";
+        var block = mc.level.getBlockState(box.pos).getBlock();
+        if (block instanceof TrappedChestBlock) return "trapped chest";
+        if (block instanceof BarrelBlock) return "barrel";
+        return "chest";
+    }
+
+    private enum Cause { Path, Open, Area }
+
+    /**
+     * Says once per container why it is skipped.
+     */
+    private void reportUnreachable(Box box, Cause cause) {
+        if (!unreachableReported.add(box.pos)) return;
+        String name = blockName(box);
+        switch (cause) {
+            case Path -> {
+                if (safeWalk.get()) warning("Can't reach the %s at %s without breaking or placing blocks, jumping or falling, skipping it.", name, at(box.pos));
+                else warning("Can't reach the %s at %s without breaking or placing blocks, skipping it.", name, at(box.pos));
+            }
+            case Open -> warning("Couldn't open the %s at %s, skipping it.", name, at(box.pos));
+            case Area -> warning("Skipping the %s at %s: the way there leaves the stash area.", name, at(box.pos));
+        }
+    }
+
+    private String areaText() {
+        if (ensureStash() == null || (stash.corner1 == null && stash.corner2 == null)) return "Stash area: none, containers are found around you (radius and height).";
+        if (stash.hasCorners() && !stash.hasArea()) return "Stash area: set in another dimension, not used here.";
+        if (!stash.hasArea()) return "Stash area: corner " + (stash.corner1 != null ? "1 is set at " + stash.corner1.toShortString() : "2 is set at " + stash.corner2.toShortString()) + ", the other is missing.";
+        return "Stash area: " + stash.areaText() + ".";
+    }
+
+    /**
+     * Outlines the stash perimeter. Also called by stash-overlay when this module is off.
+     */
+    public void drawArea(Render3DEvent event) {
+        // The tracker keeps the stash loaded every tick, even with the module off: nothing is looked up per frame
+        Stash current = stash;
+        if (mc.level == null || current == null || !current.hasArea()) return;
+        if (current.corner1 != boxCorner1 || current.corner2 != boxCorner2) {
+            boxCorner1 = current.corner1;
+            boxCorner2 = current.corner2;
+            BlockPos min = current.areaMin(), max = current.areaMax();
+            boxMin = new double[] { min.getX(), min.getY(), min.getZ() };
+            boxMax = new double[] { max.getX() + 1, max.getY() + 1, max.getZ() + 1 };
+        }
+        event.renderer.box(boxMin[0], boxMin[1], boxMin[2], boxMax[0], boxMax[1], boxMax[2], areaColor.get(), areaColor.get(), ShapeMode.Lines, 0);
+    }
+
+    // The outline as last worked out, for the corners it was worked out for
+    private BlockPos boxCorner1, boxCorner2;
+    private double[] boxMin = new double[3], boxMax = new double[3];
+
     // The stash, kept up to date
 
     /**
@@ -3961,6 +4798,9 @@ public class StashSorter extends Module {
         if (!key.equals(triedKey)) {
             triedKey = key;
             stash = Stash.load(stashName.get());
+            // Another stash, name or server: its exploration and what failed with the last one don't carry over
+            forgetExploration();
+            areaDirty = false;
         }
         else stash = null;
 
@@ -3998,6 +4838,11 @@ public class StashSorter extends Module {
             deferredAccess.clear();
             lastPlayer = null;
             ground.reset();
+            forgetExploration();
+            // Whatever walk was ours is over with the world, and Baritone gets its settings back
+            ourGoal = null;
+            if (BARITONE) BaritoneHelper.unconfine();
+            ledgeGuard(false);
             Kits.clear();
         }
 
@@ -4027,6 +4872,14 @@ public class StashSorter extends Module {
             if (mc.player == null || mc.level == null) return;
             clock++;
             ground.update();
+            // Not walking for us: Baritone's settings are the user's own
+            if (BARITONE) {
+                if (ourGoal == null) BaritoneHelper.unconfine();
+                // The user's own Baritone run took over our goal: their settings are theirs at once, not after the yield
+                else if (BaritoneHelper.isActive() && !BaritoneHelper.goalIs((baritone.api.pathing.goals.Goal) ourGoal)) BaritoneHelper.unconfine();
+            }
+            // Safeguard for the sneak: it never outlives the module
+            if (ledgeSneaking && !isActive()) ledgeGuard(false);
             labeller.restoreHand();
             restoreHotbar();
 
@@ -4042,7 +4895,9 @@ public class StashSorter extends Module {
                         job = null;
                         target = null;
                     }
-                    if (job == Job.Ground) job = null;
+                    if (job == Job.Ground || job == Job.Explore || job == Job.Unbundle) job = null;
+                    // Another dimension or a new life: nothing was explored there, and the area may not be used at all
+                    forgetExploration();
                     // Another world or dimension: the ground is another ground
                     ground.reset();
                 }
@@ -4104,6 +4959,7 @@ public class StashSorter extends Module {
 
         @EventHandler
         private void onRender(Render3DEvent event) {
+            if (isActive()) drawArea(event);
             if (!render.get() || stash == null) return;
 
             if (isActive() || pick.get() != Pick.Off) {
@@ -4333,6 +5189,28 @@ public class StashSorter extends Module {
         WLabel status = list.add(theme.label(statusText())).expandX().widget();
         list.add(theme.label("Compacting: " + (sortItems.get() ? compactor.status() : "off, scan only") + ".")).expandX();
         list.add(theme.label("Ground: " + groundStatus() + ".")).expandX();
+
+        WLabel area = list.add(theme.label(areaText())).expandX().widget();
+        WHorizontalList areaButtons = list.add(theme.horizontalList()).widget();
+        WButton corner1 = areaButtons.add(theme.button("Set corner 1 here")).widget();
+        corner1.tooltip = "Makes the block you are standing in corner 1 of the stash perimeter.";
+        corner1.action = () -> {
+            if (mc.player != null) setCorner(1, mc.player.blockPosition());
+            area.set(areaText());
+        };
+        WButton corner2 = areaButtons.add(theme.button("Set corner 2 here")).widget();
+        corner2.tooltip = "Makes the block you are standing in corner 2 of the stash perimeter.";
+        corner2.action = () -> {
+            if (mc.player != null) setCorner(2, mc.player.blockPosition());
+            area.set(areaText());
+        };
+        WButton clearArea = areaButtons.add(theme.button("Clear area")).widget();
+        clearArea.tooltip = "Removes the stash perimeter, so containers are found around you again.";
+        clearArea.action = () -> {
+            clearArea();
+            area.set(areaText());
+        };
+
         if (ensureStash() != null) {
             for (Stash.Orphan orphan : stash.orphans) {
                 list.add(theme.label(String.format("Orphaned shulker: %d stacks of %s at %s (since %s). Pick it up by hand.",
@@ -4346,8 +5224,11 @@ public class StashSorter extends Module {
         rescan.action = () -> {
             if (ensureStash() == null) return;
             for (Box box : stash.boxes) box.contents = null;
+            // The perimeter is explored again too, and containers that couldn't be reached get another try
+            forgetExploration();
             stash.save();
             version++;
+            idle = false;
             status.set(statusText());
         };
 
@@ -4519,6 +5400,8 @@ public class StashSorter extends Module {
         for (int slot : carriedSlots()) {
             // Signs kept for labelling, and what compacting is gathering and packing, are not put away
             if (labeller.reservedSlot(slot) || setAside.contains(slot)) continue;
+            // A bundle with things in it is emptied, not put away
+            if (fullBundle(mc.player.getInventory().getItem(slot))) continue;
             if (!idOf(mc.player.getInventory().getItem(slot)).equals(stuckCarried.get(slot))) slots.add(slot);
         }
         return slots;

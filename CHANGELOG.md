@@ -5,6 +5,15 @@ All notable changes to Qwerte are documented here. The format follows
 
 Versions before 0.2.8 are listed on the [GitHub releases page](https://github.com/Qwertze/Qwertze/releases).
 
+## [0.3.2-dev.1] - 2026-10-15
+
+### Added
+- stash-sorter: signs written in Unicode font letters (mathematical, fullwidth, circled, small capitals) are recognised, and signs naming an enchantment with a level (`Protection IV`, `Efficiency 5`) take enchanted books with exactly that level.
+- stash-sorter: bundles. A bundle with things in it that the sorter finds in the stash is emptied into free carry slots and the contents are sorted; empty bundles go to a chest signed `Bundles`, else one signed for shulkers or containers. Nothing is packed into bundles, and kits can't contain them.
+- stash-sorter: a stash perimeter (two corners stored with the stash). Set it with the `pick` modes Area corner 1 and 2 or the "Set corner 1/2 here" buttons, clear it with "Clear area". It replaces `radius` and `height`, the sorter explores its chunks so they load, walks anywhere inside it, and ground pickup uses it. The outline is drawn in `area-color` while stash-sorter or stash-overlay is on.
+- stash-sorter: safe walk (`safe-walk`, on by default): while the sorter walks, Baritone never parkours or falls more than one block, and the sorter sneaks at ledges with a drop of 2 or more blocks.
+- stash-sorter: Baritone is never allowed to break or place blocks while the sorter walks. A container that can't be reached that way is reported once and skipped.
+
 ## [0.3.1] - 2026-10-15
 
 ### Added

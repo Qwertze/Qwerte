@@ -129,6 +129,8 @@ switched on and off on its own.
 Write signs the way you'd talk. Each line is read on its own, a sign's lines are also read together, and lists like
 `Logs, Planks & Wood` are split up. Filler like "stuff", "items" or "supplies" is ignored, so `Redstone Stuff` works.
 
+- **Fancy letters** (like `𝖲𝗐𝗂𝖿𝗍 𝖲𝗇𝖾𝖺𝗄`, fullwidth, circled or small capitals) are read as the plain letters they stand for.
+- **Enchantments with a level**, like `Protection IV` or `Efficiency 5` (I to X or 1 to 10): enchanted books holding exactly that level go there, gear with it at that level scores lower than the gear categories, other levels never match. Without a level any level matches.
 - **Exact names** win over everything: `Diamond Block`, `Totem of Undying`.
 - **Words** in an item's name, so a shorter name finds the longer one: `rockets` finds firework rockets, `crystals`
   finds end crystals, `diamonds`, `ores`, `gold` (golden items too), `oak`, `copper`.
@@ -210,6 +212,33 @@ A kit is a set of items packed together in one shulker, slot for slot with the s
 #### Bot mode
 - With `stay-on`, it doesn't turn off when the stash is sorted. It sorts again whenever a container in the stash
   changes, and checks drop-off containers every `recheck` seconds.
+
+#### Stash perimeter
+- Set a perimeter with `pick` modes **Area corner 1** and **Area corner 2** (the block you right-click becomes the
+  corner) or the **Set corner 1/2 here** buttons in the module's GUI. **Clear area** removes it. The two corners are
+  saved with the stash. Boxes bigger than 256x128x256 are refused. The outline is drawn in `area-color` while
+  stash-sorter or stash-overlay is on.
+- With a perimeter, `radius` and `height` aren't used: every chest, trapped chest and barrel (if `barrels` is on)
+  inside it belongs to the stash, none outside does.
+- It explores first: for every 16x16 chunk column of the perimeter not seen loaded, it walks towards the middle of the
+  part of the column inside the perimeter (X and Z only) until the chunk loads, nearest first, and adds the containers
+  in it. A column is skipped after 40 seconds, 15 seconds without getting closer, or 2 seconds at the spot with it
+  still unloaded. This runs when you turn it on and after the perimeter changes, the stash changes or **Forget
+  contents**; the usual checks (enough containers, signs) follow it.
+- It walks inside the perimeter (and 2 blocks around it) on its own, even with `walk` off. Needs Baritone.
+- While the sorter walks, Baritone isn't allowed to break or place blocks, so it never digs or bridges to a
+  destination. A container it can't reach that way is reported once and skipped until the perimeter changes or you
+  press **Forget contents**.
+
+#### Bundles
+- Nothing is ever packed into a bundle, and bundles are never used as containers: compacting, repacking and kits
+  leave them alone.
+- A bundle with things in it that the sorter finds in the stash (in a chest, a drop-off, picked up from the ground, or
+  inside a mixed shulker it is cleaning) is taken out and emptied into free carry slots, one stack at a time, with the
+  plain inventory open and nothing on the cursor. The contents are sorted like anything else, and the empty bundle goes
+  to a chest signed `Bundles`, else one signed for shulkers or containers, else by the usual rules. If there aren't
+  enough free slots it empties what fits and carries on later. Bundles in your own slots are never touched.
+- It logs "Emptied a bundle: N stacks taken out."
 
 #### Scan only
 - With `sort-items` off, the module only keeps the saved stash current: it reads containers it doesn't know or that
@@ -468,8 +497,9 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 |---|---|---|---|
 | General | `stash-name` | stash | The name the stash is saved under. |
 | General | `sort-items` | on | Off is scan only: keeps the saved stash current but never moves items. |
+| General | `safe-walk` | on | While the sorter walks, Baritone never parkours or falls more than one block, and the sorter sneaks at ledges with a drop of 2 or more blocks. |
 | General | `mode` | Tiers | Tiers or Signs. |
-| General | `pick` | Off | Right-click to mark containers: Off, Exclude, Drop-off or Compact skip. |
+| General | `pick` | Off | Right-click to mark containers: Off, Exclude, Drop-off, Compact skip, Area corner 1 or Area corner 2 (the clicked block becomes that corner of the stash perimeter). |
 | General | `radius` | 8 | How far around you to look for new containers. |
 | General | `height` | 3 | How far above and below you to look. |
 | General | `barrels` | on | Include barrels as well as chests. |
@@ -503,6 +533,7 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | Search | `prefix` | find | Whispers starting with this are searches. |
 | Render | `render` | on | Highlight the container being worked on, and marked containers. |
 | Render | `shape-mode` | Both | How the highlight is drawn. |
+| Render | `area-color` | green | The outline of the stash perimeter. |
 | Render | `work-color` / `excluded-color` / `compact-skip-color` / `drop-off-color` | orange / red / purple / blue | Highlight colors. |
 
 ### stash-overlay

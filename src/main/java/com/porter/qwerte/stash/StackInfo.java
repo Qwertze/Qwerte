@@ -37,6 +37,10 @@ public final class StackInfo {
     public final boolean damaged;
     /** Enchantment names (registry paths), stored ones included. */
     public final List<String> enchants = new ArrayList<>();
+    /** Stored enchantments (enchanted books) and their levels, by registry path. */
+    public final java.util.Map<String, Integer> storedLevels = new java.util.HashMap<>();
+    /** Enchantments on gear and their levels, by registry path. */
+    public final java.util.Map<String, Integer> levels = new java.util.HashMap<>();
     /** The potion's registry path, like "strong_strength", or null. */
     public final String potion;
     /**
@@ -65,8 +69,8 @@ public final class StackInfo {
         this.block = stack.getItem() instanceof BlockItem;
         this.damaged = stack.isDamaged();
 
-        addEnchants(stack.get(DataComponents.ENCHANTMENTS));
-        addEnchants(stack.get(DataComponents.STORED_ENCHANTMENTS));
+        addEnchants(stack.get(DataComponents.ENCHANTMENTS), false);
+        addEnchants(stack.get(DataComponents.STORED_ENCHANTMENTS), true);
 
         var potionContents = stack.get(DataComponents.POTION_CONTENTS);
         String kind = null;
@@ -84,9 +88,13 @@ public final class StackInfo {
         return new StackInfo(stack);
     }
 
-    private void addEnchants(ItemEnchantments enchantments) {
+    private void addEnchants(ItemEnchantments enchantments, boolean stored) {
         if (enchantments == null) return;
-        for (var holder : enchantments.keySet()) enchants.add(path(holder.getRegisteredName()));
+        for (var holder : enchantments.keySet()) {
+            String name = path(holder.getRegisteredName());
+            enchants.add(name);
+            (stored ? storedLevels : levels).put(name, enchantments.getLevel(holder));
+        }
     }
 
     private static String path(String id) {
@@ -172,7 +180,8 @@ public final class StackInfo {
      * The key stacks are bulked by, or null for shulkers and anything with items inside, which are never repacked.
      */
     public BulkKey bulkKey() {
-        if (isShulker() || holdsItems()) return null;
+        // Nothing is ever packed into a bundle, and a bundle is never packed into anything
+        if (isShulker() || holdsItems() || stack.has(DataComponents.BUNDLE_CONTENTS)) return null;
         return new BulkKey(stack.getItem(), typeValue);
     }
 

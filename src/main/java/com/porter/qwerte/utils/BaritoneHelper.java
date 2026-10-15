@@ -5,6 +5,7 @@ import baritone.api.IBaritone;
 import baritone.api.Settings;
 import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalNear;
+import baritone.api.pathing.goals.GoalXZ;
 import baritone.api.process.IBaritoneProcess;
 import baritone.api.process.ICustomGoalProcess;
 import com.porter.qwerte.compat.BaritoneFluids;
@@ -14,6 +15,7 @@ import net.minecraft.world.level.block.Block;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 
 /**
  * Thin wrapper around dekrom's Baritone fork (https://github.com/dekrom/baritone).
@@ -24,8 +26,8 @@ public final class BaritoneHelper {
 
     // The user's own values, restored by unprotect()
     private static Boolean waterBucketFall;
-    // Likewise for break and place while a trip is confined
-    private static Boolean allowBreak, allowPlace;
+    // Break, place and the safe walk settings while a walk is confined: the setting, what it was, what we set it to
+    private static final List<Object[]> confined = new ArrayList<>();
 
     private BaritoneHelper() {}
 
@@ -132,31 +134,61 @@ public final class BaritoneHelper {
     /**
      * Keeps Baritone from breaking and placing blocks at all, remembering the user's own settings for {@link #unconfine()}.
      */
-    public static void confine() {
+    public static void confine(boolean safe) {
         Settings settings = BaritoneAPI.getSettings();
-        if (allowBreak == null) {
-            allowBreak = settings.allowBreak.value;
-            settings.allowBreak.value = false;
-        }
-        if (allowPlace == null) {
-            allowPlace = settings.allowPlace.value;
-            settings.allowPlace.value = false;
-        }
+        confineOne(settings.allowBreak, false);
+        confineOne(settings.allowPlace, false);
+        if (!safe) return;
+
+        // Safe walk: no parkour, no diagonal drops, no falls beyond a one block step down (that step is a descend, which
+        // doesn't use the fall height), no jumping at the build limit and no bucket falls
+        confineOne(settings.allowParkour, false);
+        confineOne(settings.allowParkourAscend, false);
+        confineOne(settings.allowParkourPlace, false);
+        confineOne(settings.allowDiagonalDescend, false);
+        confineOne(settings.allowWaterBucketFall, false);
+        confineOne(settings.allowJumpAt256, false);
+        confineOne(settings.maxFallHeightNoWater, 1);
     }
 
     /**
-     * Gives Baritone back the break and place settings {@link #confine()} took away.
+     * Sets a setting for the duration of the confinement, remembering what it was.
      */
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    private static void confineOne(Settings.Setting setting, Object ours) {
+        for (Object[] saved : confined) if (saved[0] == setting) return;
+        confined.add(new Object[] { setting, setting.value, ours });
+        setting.value = ours;
+    }
+
+    /**
+     * Gives Baritone back what {@link #confine(boolean)} took away. A setting the user changed in the meantime (it no
+     * longer holds the value we set) is left as they made it.
+     */
+    @SuppressWarnings({"unchecked", "rawtypes"})
     public static void unconfine() {
-        Settings settings = BaritoneAPI.getSettings();
-        if (allowBreak != null) {
-            settings.allowBreak.value = allowBreak;
-            allowBreak = null;
+        if (confined.isEmpty()) return;
+        for (Object[] saved : confined) {
+            Settings.Setting setting = (Settings.Setting) saved[0];
+            if (Objects.equals(setting.value, saved[2])) setting.value = saved[1];
         }
-        if (allowPlace != null) {
-            settings.allowPlace.value = allowPlace;
-            allowPlace = null;
-        }
+        confined.clear();
+    }
+
+    /**
+     * True while the settings are confined.
+     */
+    public static boolean confined() {
+        return !confined.isEmpty();
+    }
+
+    /**
+     * Paths to anywhere in the column at x, z, whatever the height.
+     */
+    public static Goal moveXZ(int x, int z) {
+        Goal goal = new GoalXZ(x, z);
+        baritone().getCustomGoalProcess().setGoalAndPath(goal);
+        return goal;
     }
 
     /**

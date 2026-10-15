@@ -100,6 +100,75 @@ public class Stash {
     public final List<Box> boxes = new ArrayList<>();
     private boolean dirty;
 
+    // The perimeter: two corners (inclusive), either may be unset. It only applies once both are
+    public BlockPos corner1, corner2;
+
+    public static final int MAX_X = 256, MAX_Y = 128, MAX_Z = 256;
+
+    public String areaDimension = "";
+    private static Object cachedLevel;
+    private static String cachedDimension = "";
+
+    /** The dimension of the level we are in, cached per level. */
+    public static String currentDimension() {
+        if (mc.level == null) return "";
+        if (mc.level != cachedLevel) {
+            cachedLevel = mc.level;
+            cachedDimension = mc.level.dimension().toString();
+        }
+        return cachedDimension;
+    }
+
+    /** Both corners are set, whatever dimension they are in. */
+    public boolean hasCorners() {
+        return corner1 != null && corner2 != null;
+    }
+
+    /** The perimeter applies: both corners are set, and we are in the dimension they were set in. */
+    public boolean hasArea() {
+        return corner1 != null && corner2 != null && (areaDimension.isEmpty() || areaDimension.equals(currentDimension()));
+    }
+
+    public BlockPos areaMin() {
+        return new BlockPos(Math.min(corner1.getX(), corner2.getX()), Math.min(corner1.getY(), corner2.getY()), Math.min(corner1.getZ(), corner2.getZ()));
+    }
+
+    public BlockPos areaMax() {
+        return new BlockPos(Math.max(corner1.getX(), corner2.getX()), Math.max(corner1.getY(), corner2.getY()), Math.max(corner1.getZ(), corner2.getZ()));
+    }
+
+    /**
+     * Whether the position is inside the perimeter, grown by {@code margin} blocks on every side. False without one.
+     */
+    public boolean inArea(double x, double y, double z, int margin) {
+        if (!hasArea()) return false;
+        BlockPos min = areaMin(), max = areaMax();
+        return x >= min.getX() - margin && x < max.getX() + 1 + margin && y >= min.getY() - margin && y < max.getY() + 1 + margin
+            && z >= min.getZ() - margin && z < max.getZ() + 1 + margin;
+    }
+
+    public boolean inArea(BlockPos pos) {
+        return inArea(pos.getX(), pos.getY(), pos.getZ(), 0);
+    }
+
+    /** Width, height and depth of the perimeter in blocks. */
+    public int[] areaSize() {
+        BlockPos min = areaMin(), max = areaMax();
+        return new int[] { max.getX() - min.getX() + 1, max.getY() - min.getY() + 1, max.getZ() - min.getZ() + 1 };
+    }
+
+    /** Whether the two corners would span more than the most allowed. */
+    public static boolean tooBig(BlockPos a, BlockPos b) {
+        return Math.abs(a.getX() - b.getX()) + 1 > MAX_X || Math.abs(a.getY() - b.getY()) + 1 > MAX_Y || Math.abs(a.getZ() - b.getZ()) + 1 > MAX_Z;
+    }
+
+    /** "[x1, y1, z1] to [x2, y2, z2] (W x H x D)" for the perimeter. */
+    public String areaText() {
+        BlockPos min = areaMin(), max = areaMax();
+        int[] size = areaSize();
+        return String.format("[%d, %d, %d] to [%d, %d, %d] (%d\u00d7%d\u00d7%d)", min.getX(), min.getY(), min.getZ(), max.getX(), max.getY(), max.getZ(), size[0], size[1], size[2]);
+    }
+
     public Stash(String name, String server) {
         this.name = name;
         this.server = server;
@@ -288,6 +357,10 @@ public class Stash {
         }
         root.put("orphans", lost);
 
+        if (corner1 != null) root.put("corner1", positions(List.of(corner1)));
+        if (corner2 != null) root.put("corner2", positions(List.of(corner2)));
+        if (!areaDimension.isEmpty()) root.putString("areaDimension", areaDimension);
+
         try {
             Files.createDirectories(folder());
             NbtIo.writeCompressed(root, file(name, server));
@@ -310,6 +383,17 @@ public class Stash {
 
         try {
             CompoundTag root = NbtIo.readCompressed(path, NbtAccounter.unlimitedHeap());
+            // Saved before the perimeter existed: there are no corners, which is no perimeter
+            if (root.get("corner1") instanceof ListTag c1) {
+                List<BlockPos> at = readPositions(c1);
+                if (!at.isEmpty()) stash.corner1 = at.getFirst();
+            }
+            if (root.get("corner2") instanceof ListTag c2) {
+                List<BlockPos> at = readPositions(c2);
+                if (!at.isEmpty()) stash.corner2 = at.getFirst();
+            }
+            String areaDim = string(root.get("areaDimension"));
+            if (areaDim != null) stash.areaDimension = areaDim;
             ListTag list = (ListTag) root.get("boxes");
             if (list == null) return stash;
 
