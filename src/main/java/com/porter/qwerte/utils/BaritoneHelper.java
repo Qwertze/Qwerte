@@ -24,6 +24,8 @@ public final class BaritoneHelper {
 
     // The user's own values, restored by unprotect()
     private static Boolean waterBucketFall;
+    // Likewise for break and place while a trip is confined
+    private static Boolean allowBreak, allowPlace;
 
     private BaritoneHelper() {}
 
@@ -125,6 +127,36 @@ public final class BaritoneHelper {
             settings.allowWaterBucketFall.value = false;
         }
         BaritoneFluids.protect(settings);
+    }
+
+    /**
+     * Keeps Baritone from breaking and placing blocks at all, remembering the user's own settings for {@link #unconfine()}.
+     */
+    public static void confine() {
+        Settings settings = BaritoneAPI.getSettings();
+        if (allowBreak == null) {
+            allowBreak = settings.allowBreak.value;
+            settings.allowBreak.value = false;
+        }
+        if (allowPlace == null) {
+            allowPlace = settings.allowPlace.value;
+            settings.allowPlace.value = false;
+        }
+    }
+
+    /**
+     * Gives Baritone back the break and place settings {@link #confine()} took away.
+     */
+    public static void unconfine() {
+        Settings settings = BaritoneAPI.getSettings();
+        if (allowBreak != null) {
+            settings.allowBreak.value = allowBreak;
+            allowBreak = null;
+        }
+        if (allowPlace != null) {
+            settings.allowPlace.value = allowPlace;
+            allowPlace = null;
+        }
     }
 
     /**

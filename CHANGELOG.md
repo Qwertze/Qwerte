@@ -5,6 +5,12 @@ All notable changes to Qwerte are documented here. The format follows
 
 Versions before 0.2.8 are listed on the [GitHub releases page](https://github.com/Qwertze/Qwertze/releases).
 
+## [0.3.1-dev.1] - 2026-10-15
+
+### Added
+- stash-sorter: picking up items other players left on the ground in the stash area (`collect-ground`, `collect-range`). Only with no other player loaded, only items lying still for 3 seconds, never your own drops or items from blocks you dug.
+- stash-sorter: scan-only mode (`sort-items` off). It reads unknown or stale containers and keeps the saved stash current, but never moves items. stash-overlay keeps working in it.
+
 ## [0.3.0] - 2026-10-15
 
 Includes everything from 0.2.8, which wasn't released separately.

@@ -19,6 +19,7 @@ import meteordevelopment.meteorclient.events.entity.player.InteractBlockEvent;
 import meteordevelopment.meteorclient.events.game.GameLeftEvent;
 import meteordevelopment.meteorclient.events.game.OpenScreenEvent;
 import meteordevelopment.meteorclient.events.game.ReceiveMessageEvent;
+import meteordevelopment.meteorclient.events.packets.PacketEvent;
 import meteordevelopment.meteorclient.events.render.Render3DEvent;
 import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.gui.GuiTheme;
@@ -100,6 +101,7 @@ import java.util.regex.Pattern;
 public class StashSorter extends Module {
     private final SettingGroup sgGeneral = settings.getDefaultGroup();
     private final SettingGroup sgBot = settings.createGroup("Bot");
+    private final SettingGroup sgGround = settings.createGroup("Ground");
     private final SettingGroup sgWatch = settings.createGroup("Watch");
     private final SettingGroup sgLabels = settings.createGroup("Labels");
     private final SettingGroup sgShulkers = settings.createGroup("Shulkers");
@@ -149,6 +151,13 @@ public class StashSorter extends Module {
         .description("The name the stash is saved under. Each name on each server is its own stash, scanned once and then kept up to date.")
         .defaultValue("stash")
         .onChanged(name -> stash = null)
+        .build()
+    );
+
+    private final Setting<Boolean> sortItems = sgGeneral.add(new BoolSetting.Builder()
+        .name("sort-items")
+        .description("Off: scan only. The module still reads containers it doesn't know or that went stale, watches containers and signs, and keeps the saved stash current for stash-overlay and search, but never moves items: no taking, depositing, compacting, labelling, kits or picking up from the ground. Containers are only opened to read them.")
+        .defaultValue(true)
         .build()
     );
 
@@ -263,6 +272,25 @@ public class StashSorter extends Module {
         .range(5, 600)
         .sliderRange(5, 120)
         .visible(stayOn::get)
+        .build()
+    );
+
+    // Ground
+
+    private final Setting<Boolean> collectGround = sgGround.add(new BoolSetting.Builder()
+        .name("collect-ground")
+        .description("Between jobs, walks onto items other players left lying in the stash area (the containers plus the range below, 4 blocks up and down) and sorts them with the rest. Needs Baritone. Never items you dropped or threw, or that came from blocks you broke, only items that have lain still for 3 seconds, and only while no other player is loaded. Not in scan-only mode.")
+        .defaultValue(true)
+        .build()
+    );
+
+    private final Setting<Integer> collectRange = sgGround.add(new IntSetting.Builder()
+        .name("collect-range")
+        .description("How many blocks around the outermost containers to pick items up from.")
+        .defaultValue(8)
+        .range(0, 64)
+        .sliderRange(0, 32)
+        .visible(collectGround::get)
         .build()
     );
 
@@ -482,7 +510,7 @@ public class StashSorter extends Module {
         Pattern.compile("^(\\w{3,16}) -> (?:me|you): (.+)$")
     };
 
-    private enum Job { Survey, Take, Deposit, Dump, Fetch, Clean, Fill, Compact, KitTake, KitUnpack, KitFill, FetchSigns, Label, Gather }
+    private enum Job { Survey, Take, Deposit, Dump, Fetch, Clean, Fill, Compact, KitTake, KitUnpack, KitFill, FetchSigns, Label, Gather, Ground }
 
     private enum Step { Walking, Opening, Working }
 
@@ -812,6 +840,98 @@ public class StashSorter extends Module {
         }
     });
     private int moved;
+    // Containers read by surveys since the last summary, for scan-only mode
+    private int scanned;
+
+    // Picking up what other players left on the ground
+    private final GroundCollector ground = new GroundCollector(new GroundCollector.Owner() {
+        @Override
+        public Stash stash() {
+            return stash;
+        }
+
+        @Override
+        public boolean enabled() {
+            return groundOn();
+        }
+
+        @Override
+        public int range() {
+            return collectRange.get();
+        }
+
+        @Override
+        public int freeCarrySlot() {
+            return StashSorter.this.freeCarrySlot();
+        }
+
+        @Override
+        public boolean carries(int slot) {
+            return carry.contains(slot);
+        }
+
+        @Override
+        public int moveToCarry(int slot) {
+            int free = StashSorter.this.freeCarrySlot();
+            if (free == -1 || mc.screen != null || !mc.player.containerMenu.getCarried().isEmpty()) return -1;
+            InvUtils.move().from(slot).to(free);
+            lastOwnAct = ticks;
+            yielder.inventoryChangedByUs();
+            return free;
+        }
+
+        @Override
+        public void held(int slot, ItemStack stack) {
+            stashHeld.put(slot, stack.copy());
+        }
+
+        @Override
+        public void walkTo(BlockPos pos) {
+            if (!BARITONE) return;
+            BaritoneHelper.protect(List.of());
+            usedBaritone = true;
+            setGoal(BaritoneHelper.moveNear(pos, 0));
+        }
+
+        @Override
+        public void releaseGoal() {
+            StashSorter.this.releaseGoal();
+        }
+
+        @Override
+        public void confine() {
+            if (BARITONE) BaritoneHelper.confine();
+        }
+
+        @Override
+        public void unconfine() {
+            if (BARITONE) BaritoneHelper.unconfine();
+        }
+
+        @Override
+        public void finished(boolean pickedUp) {
+            if (job == Job.Ground) job = null;
+            wait = delay.get();
+            lastOwnAct = ticks;
+            if (pickedUp) {
+                // What came in is put away like anything else carried
+                idle = false;
+                clearStalled();
+                stuckCarried.clear();
+                stuckWarned = false;
+            }
+        }
+
+        @Override
+        public void say(String text) {
+            info("%s", text);
+        }
+
+        @Override
+        public void debug(String text) {
+            StashSorter.this.debug("%s", text);
+        }
+    });
 
     // Containers where the last job got nothing done, skipped until something moves somewhere else
     private final Set<Box> stalled = new HashSet<>();
@@ -1232,10 +1352,19 @@ public class StashSorter extends Module {
         placedConfirmed = false;
         kitBuilder.reset();
         collectedSlot = -1;
+        scanned = 0;
+        ground.abort();
 
-        if (!pickCarrySlots()) {
-            toggle();
-            return;
+        // Scan-only never carries anything, so there are no slots to find
+        if (sortItems.get()) {
+            if (!pickCarrySlots()) {
+                toggle();
+                return;
+            }
+        }
+        else {
+            carry.clear();
+            pruneHeld();
         }
 
         boolean existed = ensureStash() != null;
@@ -1260,20 +1389,28 @@ public class StashSorter extends Module {
         checkOrphans();
 
         long sortable = stash.boxes.stream().filter(b -> !b.excluded && !b.dropOff).count();
-        if (sortable < 2) {
+        if (!sortItems.get()) {
+            if (stash.boxes.isEmpty()) {
+                error("Found no containers within %d blocks.", radius.get());
+                toggle();
+                return;
+            }
+        }
+        else if (sortable < 2) {
             error("Found %d container%s to sort within %d blocks, need at least 2.", sortable, sortable == 1 ? "" : "s", radius.get());
             toggle();
             return;
         }
 
-        if (mode.get() == Mode.Signs && stash.boxes.stream().allMatch(b -> b.labels.isEmpty())) {
+        if (sortItems.get() && mode.get() == Mode.Signs && stash.boxes.stream().allMatch(b -> b.labels.isEmpty())) {
             error("None of the containers have signs on them. Put signs on them, or use Tiers mode.");
             toggle();
             return;
         }
 
         int unknown = stash.boxes.size() - stash.knownCount();
-        if (!existed) info("New stash \"%s\": scanning %d containers, then sorting.", stash.name, stash.boxes.size());
+        if (!sortItems.get()) info("Stash \"%s\": %d containers, scan only: reading %d unknown or stale ones, then watching for changes.", stash.name, stash.boxes.size(), unknown);
+        else if (!existed) info("New stash \"%s\": scanning %d containers, then sorting.", stash.name, stash.boxes.size());
         else if (unknown > 0) info("Stash \"%s\": %d containers, scanning %d new ones first.", stash.name, stash.boxes.size(), unknown);
         else info("Stash \"%s\": %d containers, sorting by %s.", stash.name, stash.boxes.size(), mode.get() == Mode.Tiers ? "tier" : "sign");
 
@@ -1290,6 +1427,7 @@ public class StashSorter extends Module {
         ownedMenu = null;
         gate = Gate.Running;
         labeller.deactivate();
+        ground.abort();
 
         if (usedBaritone) {
             releaseGoal();
@@ -1412,14 +1550,32 @@ public class StashSorter extends Module {
             releaseDeferred();
             applyStale();
             applySignChanges();
-            if (idle && !wakeUp()) return;
-            // Nothing is started while someone else is busy, nor until they have been quiet for a while
-            if (foreign != null || !yielder.quietElapsed()) return;
-            if (!nextJob()) return;
+            // Scan-only was switched off: there are carry slots to find now
+            if (sortItems.get() && carry.isEmpty()) {
+                if (!pickCarrySlots()) {
+                    toggle();
+                    return;
+                }
+                idle = false;
+            }
+            if (idle && !wakeUp()) {
+                // Resting: only something on the ground can still start a job. Looked at every half second, and only
+                // when nobody else is busy
+                if (ticks % 10 != 0 || foreign != null || !yielder.quietElapsed() || !startGround()) return;
+            }
+            else {
+                // Nothing is started while someone else is busy, nor until they have been quiet for a while
+                if (foreign != null || !yielder.quietElapsed()) return;
+                if (!nextJob()) return;
+            }
         }
 
         if (handle != null) {
             tickHandling();
+            return;
+        }
+        if (job == Job.Ground) {
+            ground.tick();
             return;
         }
         if (job == Job.Label) {
@@ -1450,13 +1606,47 @@ public class StashSorter extends Module {
         return idle && job == null && handle == null;
     }
 
+    // Picking up from the ground
+
+    /**
+     * Collecting from the ground is on and possible: the setting, not scan-only, Baritone there, the module running.
+     */
+    private boolean groundOn() {
+        return isActive() && sortItems.get() && collectGround.get() && BARITONE;
+    }
+
+    /**
+     * Between jobs, with nothing else to do: starts a trip to something lying on the ground. Never while a shulker is
+     * standing in the world, a kit or a compaction is in hand, or a container is open.
+     * @return true when a trip has begun
+     */
+    private boolean startGround() {
+        if (job != null || handle != null || placed != null || gate != Gate.Running) return false;
+        if (compactor.active() || kitBuilder.active() || mc.player.containerMenu != mc.player.inventoryMenu) return false;
+        if (!mc.player.containerMenu.getCarried().isEmpty() || mc.screen != null) return false;
+        if (!ground.next()) return false;
+
+        job = Job.Ground;
+        target = null;
+        handle = null;
+        actions = 0;
+        jobCounted = false;
+        stepTicks = 0;
+        jobInterruptions = 0;
+        startSigSet = endSigSet = false;
+        settled = false;
+        openPos = null;
+        openMenuBefore = null;
+        return true;
+    }
+
     /**
      * The menu is a container window the sorter opened, or is in the middle of opening.
      */
     private boolean ourMenu(AbstractContainerMenu menu) {
         if (menu == null || mc.player == null || menu == mc.player.inventoryMenu) return false;
         if (menu == ownedMenu) return true;
-        if (job == null) return false;
+        if (job == null || job == Job.Ground) return false;
         // A chest that opens while a sign is going up is the click's doing, and ours to close
         if (job == Job.Label) return labeller.ownsChest(menu);
         if (handle != null) return handle == Handle.Open && menu instanceof ShulkerBoxMenu;
@@ -1508,6 +1698,11 @@ public class StashSorter extends Module {
         if (job != null) {
             yielder.interrupted();
             jobInterruptions++;
+        }
+        // A trip to the ground is simply dropped, the item is looked at again later
+        if (job == Job.Ground) {
+            ground.abort();
+            job = null;
         }
         if (stash.isDirty()) stash.save();
         yielder.startWaiting(reason);
@@ -1683,7 +1878,8 @@ public class StashSorter extends Module {
     private boolean wakeUp() {
         idleTicks++;
 
-        if (idleTicks >= recheck.get() * 20) {
+        // Drop-offs are only emptied when sorting; scan-only learns of their changes from the lids
+        if (sortItems.get() && idleTicks >= recheck.get() * 20) {
             idleTicks = 0;
             boolean any = false;
             for (Box box : stash.boxes) {
@@ -1756,6 +1952,14 @@ public class StashSorter extends Module {
     private boolean pickJob() {
         Box unread = nearest(stash.boxes.stream().filter(b -> !b.known() && !b.unreachable && !failedSurvey.contains(b) && !signPending(b)).toList());
         if (unread != null) return start(Job.Survey, unread);
+
+        // Scan-only: everything is read, nothing is moved. A kit in hand is let go of, and a shulker standing in the
+        // world is fetched back by finishSorting
+        if (!sortItems.get()) {
+            kitBuilder.suspend("scan only.");
+            finishSorting();
+            return false;
+        }
 
         plan();
         destCache = new HashMap<>();
@@ -1880,6 +2084,9 @@ public class StashSorter extends Module {
 
         // A sign that is being changed decides what is left to do: wait for it before calling it done
         if (watchSigns.get() && mode.get() == Mode.Signs && stashWatch.anyPending()) return false;
+
+        // Everything is put away: whatever others left on the ground comes before kits and compacting
+        if (startGround()) return true;
 
         // Nothing left to sort: build kits
         if (kitsOn() && activeCarried().isEmpty() && !compactor.active() && kitBuilder.begin() && runKit(kitBuilder.next())) return true;
@@ -2722,7 +2929,27 @@ public class StashSorter extends Module {
         extra += compactor.takeRunSummary();
         if (!stuckCarried.isEmpty()) extra += String.format(" %d stacks I am carrying have nowhere to go.", stuckCarried.size());
         long leftInDropOffs = stash.boxes.stream().filter(b -> b.dropOff && b.known() && !b.unreachable).mapToLong(b -> b.contents.length - b.free()).sum();
-        if (leftInDropOffs > 0) extra += String.format(" %d stacks are still in drop-offs, there's no room left in the stash.", leftInDropOffs);
+        if (sortItems.get() && leftInDropOffs > 0) extra += String.format(" %d stacks are still in drop-offs, there's no room left in the stash.", leftInDropOffs);
+
+        // Scan-only: one scan, then off, unless stay-on keeps it watching
+        if (!sortItems.get()) {
+            if (!stayOn.get()) {
+                info("Scan only: read %d containers, the saved stash is up to date.%s", scanned, extra);
+                scanned = 0;
+                toggle();
+                return;
+            }
+            if (scanned > 0 || !extra.equals(lastSummary)) {
+                info("Scan only: read %d containers, the saved stash is up to date.%s Watching for changes.", scanned, extra);
+            }
+            lastSummary = extra;
+            scanned = 0;
+            moved = 0;
+            idle = true;
+            idleTicks = 0;
+            seenVersion = version;
+            return;
+        }
 
         if (stayOn.get()) {
             // Waking up for a drop-off check that finds nothing says nothing; a changed summary does
@@ -2806,6 +3033,7 @@ public class StashSorter extends Module {
             futile.put(futileKey(target, job), futileSig(target));
         }
         if (actions > 0 && target != null) signAbortRuns.remove(target);
+        if (job == Job.Survey && target != null && target.known()) scanned++;
 
         int visits = target == null ? 0 : boxVisits.getOrDefault(target, 0);
         if (jobCounted && visits >= 3 && job != Job.Survey && target != null && loopReported.add(target)) {
@@ -2955,7 +3183,7 @@ public class StashSorter extends Module {
         }
 
         boolean busy = switch (job) {
-            case Survey, Clean, Fill, KitUnpack, KitFill, Label -> false;
+            case Survey, Clean, Fill, KitUnpack, KitFill, Label, Ground -> false;
             case FetchSigns -> labeller.fetchSignsOne(target, actions);
             case Gather -> compactor.gatherOne(target);
             case KitTake -> kitBuilder.takeOne(target);
@@ -3769,7 +3997,14 @@ public class StashSorter extends Module {
             staleBoxes.clear();
             deferredAccess.clear();
             lastPlayer = null;
+            ground.reset();
             Kits.clear();
+        }
+
+        @EventHandler
+        private void onPacketSend(PacketEvent.Send event) {
+            // Whatever the player drops or breaks is theirs, from any source: the keys, clicks, other modules
+            ground.onPacket(event.packet);
         }
 
         @EventHandler
@@ -3791,6 +4026,7 @@ public class StashSorter extends Module {
         private void onTick(TickEvent.Post event) {
             if (mc.player == null || mc.level == null) return;
             clock++;
+            ground.update();
             labeller.restoreHand();
             restoreHotbar();
 
@@ -3806,6 +4042,9 @@ public class StashSorter extends Module {
                         job = null;
                         target = null;
                     }
+                    if (job == Job.Ground) job = null;
+                    // Another world or dimension: the ground is another ground
+                    ground.reset();
                 }
                 lastPlayer = mc.player;
             }
@@ -3916,7 +4155,7 @@ public class StashSorter extends Module {
             stashWatch.tickLids(stash, clock, watchDelay.get() * 20L, this::openedByUs, this::accessed);
         }
 
-        if (isActive() && watchSigns.get() && mode.get() == Mode.Signs && clock % SIGN_POLL_TICKS == 0) {
+        if (isActive() && signsWatched() && clock % SIGN_POLL_TICKS == 0) {
             stashWatch.pollSigns(stash, clock, b -> job == Job.Label && b == target);
         }
     }
@@ -3986,11 +4225,18 @@ public class StashSorter extends Module {
     }
 
     /**
+     * Signs are watched for changes: while sorting by signs, and in scan-only mode, which keeps the saved labels current.
+     */
+    private boolean signsWatched() {
+        return watchSigns.get() && (mode.get() == Mode.Signs || !sortItems.get());
+    }
+
+    /**
      * Between jobs: signs that have been left alone for a while are read again and what they changed is sorted, and now
      * and then all of them, which catches what was missed (a chunk loading in).
      */
     private void applySignChanges() {
-        if (!watchSigns.get() || mode.get() != Mode.Signs) return;
+        if (!signsWatched()) return;
 
         if (clock >= nextSignSweep) {
             nextSignSweep = clock + SIGN_SWEEP_TICKS;
@@ -4047,8 +4293,9 @@ public class StashSorter extends Module {
         futile.clear();
         idle = false;
 
-        info("Sign at %s changed: \"%s\" -> \"%s\", re-sorting.", box.pos.toShortString(),
-            before.isEmpty() ? "no sign" : before.getFirst(), now.isEmpty() ? "no sign" : now.getFirst());
+        String was = before.isEmpty() ? "no sign" : before.getFirst(), is = now.isEmpty() ? "no sign" : now.getFirst();
+        if (sortItems.get()) info("Sign at %s changed: \"%s\" -> \"%s\", re-sorting.", box.pos.toShortString(), was, is);
+        else info("Sign at [%d, %d, %d] changed: \"%s\" -> \"%s\" (scan only).", box.pos.getX(), box.pos.getY(), box.pos.getZ(), was, is);
     }
 
     // Searching
@@ -4084,7 +4331,8 @@ public class StashSorter extends Module {
         WVerticalList list = theme.verticalList();
 
         WLabel status = list.add(theme.label(statusText())).expandX().widget();
-        list.add(theme.label("Compacting: " + compactor.status() + ".")).expandX();
+        list.add(theme.label("Compacting: " + (sortItems.get() ? compactor.status() : "off, scan only") + ".")).expandX();
+        list.add(theme.label("Ground: " + groundStatus() + ".")).expandX();
         if (ensureStash() != null) {
             for (Stash.Orphan orphan : stash.orphans) {
                 list.add(theme.label(String.format("Orphaned shulker: %d stacks of %s at %s (since %s). Pick it up by hand.",
@@ -4206,8 +4454,15 @@ public class StashSorter extends Module {
 
         long excluded = stash.boxes.stream().filter(b -> b.excluded).count();
         long dropOffs = stash.boxes.stream().filter(b -> b.dropOff).count();
-        return String.format("\"%s\": %d containers (%d read, %d excluded, %d drop-off), %,d items.",
-            stash.name, stash.boxes.size(), stash.knownCount(), excluded, dropOffs, stash.itemCount());
+        return String.format("\"%s\": %d containers (%d read, %d excluded, %d drop-off), %,d items.%s",
+            stash.name, stash.boxes.size(), stash.knownCount(), excluded, dropOffs, stash.itemCount(), sortItems.get() ? "" : " Scan only.");
+    }
+
+    private String groundStatus() {
+        if (!sortItems.get()) return "off (scan only)";
+        if (!collectGround.get() || !isActive()) return "off";
+        if (!BARITONE) return "off, Baritone isn't installed";
+        return ground.status();
     }
 
     private void fillResults(GuiTheme theme, WTable table, String query) {

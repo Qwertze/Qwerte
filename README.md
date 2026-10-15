@@ -211,6 +211,28 @@ A kit is a set of items packed together in one shulker, slot for slot with the s
 - With `stay-on`, it doesn't turn off when the stash is sorted. It sorts again whenever a container in the stash
   changes, and checks drop-off containers every `recheck` seconds.
 
+#### Scan only
+- With `sort-items` off, the module only keeps the saved stash current: it reads containers it doesn't know or that
+  went stale (also after **Forget contents**) and watches containers and signs. It does one scan and turns off, or with
+  `stay-on` keeps watching. It never moves items: no
+  taking, depositing, compacting, labelling, kits or picking up from the ground, and it opens containers only to read
+  them. The status and the log say "scan only". stash-overlay and search keep working, with stash-sorter in this mode
+  and with it off.
+
+#### Picking up from the ground
+- With `collect-ground` (and Baritone), between jobs it walks onto items other players left lying in the stash area
+  (the containers plus `collect-range` blocks around them, 4 blocks up and down) and sorts them with the rest. It
+  never leaves that area.
+- Only items that have lain still for 3 seconds, and only while no other player is loaded: if one turns up on the way
+  it stops at once and waits until every other player is gone.
+- Never items you dropped or threw (the drop keys, throw clicks, clicking outside a window, other modules) or that
+  came from blocks you dug. Items in or above lava, fire, cacti, magma, berry bushes or powder snow are skipped. During
+  a trip Baritone may not break or place blocks, and the trip ends if you end up more than 2 blocks outside the area.
+  An item it can't reach or doesn't pick up within 20 seconds (or 2 seconds of standing on it) is left alone for
+  5 minutes. Trips run after everything is put away, before kits and compacting.
+- What it picks up counts as stash cargo, so tools and food from the ground are put away like anything else. The
+  module's GUI shows the ground status.
+
 #### Carry slots
 - By default it carries items in every inventory slot that's empty when it starts, so your own items are never touched.
 - `carry-slots` picks exactly which slots to use, like `28-36`. `keep-slots` marks slots never to touch. Slots 1-9 are
@@ -445,6 +467,7 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | Group | Setting | Default | Description |
 |---|---|---|---|
 | General | `stash-name` | stash | The name the stash is saved under. |
+| General | `sort-items` | on | Off is scan only: keeps the saved stash current but never moves items. |
 | General | `mode` | Tiers | Tiers or Signs. |
 | General | `pick` | Off | Right-click to mark containers: Off, Exclude, Drop-off or Compact skip. |
 | General | `radius` | 8 | How far around you to look for new containers. |
@@ -459,6 +482,8 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | General | `debug` | off | Says in chat why containers are skipped or given up on. Always logged at debug level. |
 | Bot | `stay-on` | off | Keep running after sorting, as a sorting bot. |
 | Bot | `recheck` | 30 | Seconds between drop-off checks. |
+| Ground | `collect-ground` | on | Between jobs, picks up items other players left lying in the stash area, when no other player is loaded. Needs Baritone. Never your own drops or items from blocks you broke. |
+| Ground | `collect-range` | 8 | Blocks around the outermost containers to pick up from (and 4 up and down). |
 | Labels | `auto-label` | on | Signs mode: puts a sign on an empty, unsigned chest next to the signed ones for items nothing is signed for. Never places or breaks a chest, never breaks a sign. |
 | Labels | `label-gap` | 10 | Seconds to wait between putting up signs. |
 | Watch | `watch` | on | Notices when another player opens and closes a stash container, and reads it again after `watch-delay`. Works with the module off. |
@@ -519,6 +544,7 @@ src/main/java/com/porter/qwerte/
 │   ├── AutoDirt.java         The auto-dirt module: covering ground with dirt
 │   ├── StashSorter.java      The stash-sorter module: sorting, kits, bot mode, picking, search
 │   ├── KitBuilder.java       Building saved kits out of the stash, for stash-sorter
+│   ├── GroundCollector.java  Picking up items left on the ground in the stash area, for stash-sorter
 │   ├── StashOverlay.java     The stash-overlay module: an icon of each container's main item
 │   ├── Restocker.java        Storage and ender chest restocking, shared by auto-till and auto-dirt
 │   └── StorageList.java      The list of storages a module restocks from, in the order it tries them
@@ -534,6 +560,7 @@ src/main/java/com/porter/qwerte/
 
 src/<minecraft>/java/com/porter/qwerte/compat/
 ├── Players.java              The selected hotbar slot
+├── Drops.java                Telling from outgoing packets when you drop items or break blocks
 ├── RightClick.java           Right clicks, for picking storages and stations
 ├── ItemIcons.java            Drawing item icons on screen, for stash-overlay
 └── BaritoneFluids.java       Keeping Baritone from placing blocks in water, where the version allows it
