@@ -16,6 +16,7 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.Utils;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
@@ -802,6 +803,21 @@ public class AutoTill extends Module implements Restocker.Owner {
     private boolean warnedHoldHoe;
     private int slotBeforeTrip = -1;
 
+    // Whether the last tick did something: walking, refilling, tilling or planting, as opposed to waiting for ground
+    private boolean busy;
+
+    /**
+     * True only while it's actually working, not while it's on and waiting for something to do.
+     */
+    public boolean working() {
+        return isActive() && busy;
+    }
+
+    private static boolean sorterBusy() {
+        StashSorter sorter = Modules.get().get(StashSorter.class);
+        return sorter != null && sorter.busyWithJob();
+    }
+
     private enum State { Working, Exploring, Approaching, GoingToWater, Filling, GoingToStorage, Restocking, Returning }
 
     public enum RestockMode {
@@ -1227,6 +1243,7 @@ public class AutoTill extends Module implements Restocker.Owner {
 
     @EventHandler
     private void onTick(TickEvent.Pre event) {
+        busy = false;
         targets.clear();
         dryTargets.clear();
         plantTargets.clear();
@@ -1247,6 +1264,10 @@ public class AutoTill extends Module implements Restocker.Owner {
         tickCount++;
         warnAboutIce();
 
+        // The stash sorter is in the middle of a job: no new action starts until it's done (a step of ours under way is
+        // finished first)
+        if (state == State.Working && iceHole == null && !digSwapped && !mc.gameMode.isDestroying() && sorterBusy()) return;
+
         // Keep the hotbar stocked. A move takes the tick, and it waits while a hole is being dug or filled with ice
         // or a tool swapped in for digging is still out.
         // A swapped-in digging tool outside of any dig would otherwise hold the hotbar still for good
@@ -1259,6 +1280,8 @@ public class AutoTill extends Module implements Restocker.Owner {
             if (supply.pick.get() && !supply.usingStorage()) supply.pick.set(false);
         }
 
+        if (iceHole != null) busy = true;
+
         // A hole being filled with ice takes the whole tick, wherever we are, until it's watered
         if (iceHole != null && state != State.Approaching && state != State.Filling && state != State.Restocking
             && driveIce(mc.player.getEyePosition())) return;
@@ -1269,6 +1292,7 @@ public class AutoTill extends Module implements Restocker.Owner {
 
         // Travelling or refilling takes over the whole tick
         if (state != State.Working) {
+            busy = true;
             tickAutomation();
             return;
         }
@@ -1300,6 +1324,8 @@ public class AutoTill extends Module implements Restocker.Owner {
 
             targets.add(pos.immutable());
         }
+
+        busy = !targets.isEmpty() || !plantTargets.isEmpty() || !boneTargets.isEmpty() || waterSpot != null;
 
         // Low on seeds comes first: no point tilling land we have nothing to plant on. Leave a hole half dug
         // rather than mid-swing though, it's picked back up afterwards.

@@ -39,6 +39,13 @@ public class Stash {
         public boolean dropOff;
         public boolean unreachable;
         public int order;
+        // The text of the sign the sorter put up on this container itself, and where, saved with the stash
+        public String autoLabel;
+        public BlockPos autoSignPos;
+        // Putting a sign on it failed this run
+        public boolean labelFailed;
+        // Never used to gather stacks or shulkers for compacting
+        public boolean noCompact;
 
         public Box(BlockPos pos, List<BlockPos> parts) {
             this.pos = pos;
@@ -67,6 +74,27 @@ public class Stash {
         }
     }
 
+    /**
+     * A shulker with stacks in it the sorter put down and could not pick up again.
+     */
+    public static class Orphan {
+        public final BlockPos pos;
+        public final String item;
+        public final int stacks;
+        public final String when;
+        // The dimension it stands in, empty if unknown
+        public final String dimension;
+
+        public Orphan(BlockPos pos, String item, int stacks, String when, String dimension) {
+            this.pos = pos;
+            this.item = item;
+            this.stacks = stacks;
+            this.when = when;
+            this.dimension = dimension == null ? "" : dimension;
+        }
+    }
+
+    public final List<Orphan> orphans = new ArrayList<>();
     public final String name;
     public final String server;
     public final List<Box> boxes = new ArrayList<>();
@@ -224,6 +252,9 @@ public class Stash {
             tag.put("parts", positions(box.parts));
             tag.putBoolean("excluded", box.excluded);
             tag.putBoolean("dropOff", box.dropOff);
+            if (box.noCompact) tag.putBoolean("noCompact", true);
+            if (box.autoLabel != null) tag.putString("autoLabel", box.autoLabel);
+            if (box.autoSignPos != null) tag.put("autoSignPos", positions(List.of(box.autoSignPos)));
 
             if (box.known()) {
                 tag.putInt("size", box.contents.length);
@@ -244,6 +275,18 @@ public class Stash {
             list.add(tag);
         }
         root.put("boxes", list);
+
+        ListTag lost = new ListTag();
+        for (Orphan orphan : orphans) {
+            CompoundTag tag = new CompoundTag();
+            tag.put("pos", positions(List.of(orphan.pos)));
+            tag.putString("item", orphan.item);
+            tag.putInt("stacks", orphan.stacks);
+            tag.putString("when", orphan.when);
+            tag.putString("dimension", orphan.dimension);
+            lost.add(tag);
+        }
+        root.put("orphans", lost);
 
         try {
             Files.createDirectories(folder());
@@ -278,6 +321,12 @@ public class Stash {
                 Box box = new Box(parts.getFirst(), parts);
                 box.excluded = flag(tag, "excluded");
                 box.dropOff = flag(tag, "dropOff");
+                box.noCompact = flag(tag, "noCompact");
+                box.autoLabel = string(tag.get("autoLabel"));
+                if (tag.get("autoSignPos") instanceof ListTag sign) {
+                    List<BlockPos> at = readPositions(sign);
+                    if (!at.isEmpty()) box.autoSignPos = at.getFirst();
+                }
 
                 int size = number(tag.get("size"), -1);
                 if (size >= 0) {
@@ -296,6 +345,17 @@ public class Stash {
 
                 stash.boxes.add(box);
             }
+            if (root.get("orphans") instanceof ListTag lost) {
+                for (Tag t : lost) {
+                    if (!(t instanceof CompoundTag tag) || !(tag.get("pos") instanceof ListTag at)) continue;
+                    List<BlockPos> pos = readPositions(at);
+                    if (pos.isEmpty()) continue;
+                    String item = string(tag.get("item"));
+                    String when = string(tag.get("when"));
+                    stash.orphans.add(new Orphan(pos.getFirst(), item == null ? "items" : item, number(tag.get("stacks"), 0), when == null ? "" : when,
+                        string(tag.get("dimension"))));
+                }
+            }
         } catch (IOException | ClassCastException e) {
             QwerteAddon.LOG.error("Couldn't load stash {}", name, e);
         }
@@ -313,6 +373,15 @@ public class Stash {
     private static int number(Tag tag, int fallback) {
         if (tag == null) return fallback;
         return NbtOps.INSTANCE.getNumberValue(tag).result().map(Number::intValue).orElse(fallback);
+    }
+
+    /**
+     * Reads a string tag. String access on compound tags changed between Minecraft versions, but reading through NbtOps
+     * works on all.
+     */
+    private static String string(Tag tag) {
+        if (tag == null) return null;
+        return NbtOps.INSTANCE.getStringValue(tag).result().orElse(null);
     }
 
     private static ListTag positions(List<BlockPos> list) {

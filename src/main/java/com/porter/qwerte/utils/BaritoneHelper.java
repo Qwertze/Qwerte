@@ -3,7 +3,10 @@ package com.porter.qwerte.utils;
 import baritone.api.BaritoneAPI;
 import baritone.api.IBaritone;
 import baritone.api.Settings;
+import baritone.api.pathing.goals.Goal;
 import baritone.api.pathing.goals.GoalNear;
+import baritone.api.process.IBaritoneProcess;
+import baritone.api.process.ICustomGoalProcess;
 import com.porter.qwerte.compat.BaritoneFluids;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.block.Block;
@@ -31,8 +34,55 @@ public final class BaritoneHelper {
     /**
      * Paths to anywhere within {@code range} blocks of {@code pos}, 0 meaning exactly there.
      */
-    public static void moveNear(BlockPos pos, int range) {
-        baritone().getCustomGoalProcess().setGoalAndPath(new GoalNear(pos, range));
+    public static Goal moveNear(BlockPos pos, int range) {
+        Goal goal = new GoalNear(pos, range);
+        baritone().getCustomGoalProcess().setGoalAndPath(goal);
+        return goal;
+    }
+
+    /**
+     * Clears the custom goal process, but only if its current goal is {@code ours}. Never cancels anything else, so
+     * the user's own Baritone processes and goals survive. Returns true if we released it.
+     */
+    public static boolean releaseOurs(Goal ours) {
+        if (ours == null) return false;
+        ICustomGoalProcess process = baritone().getCustomGoalProcess();
+        if (process.getGoal() != ours) return false;
+        process.onLostControl();
+        return true;
+    }
+
+    /**
+     * True while the custom goal process still has {@code ours} as its goal: it has not been cleared or replaced.
+     */
+    public static boolean goalIs(Goal ours) {
+        return ours != null && baritone().getCustomGoalProcess().getGoal() == ours;
+    }
+
+    /**
+     * True while Baritone is pathing or any process is active, whoever owns it.
+     */
+    public static boolean isActive() {
+        IBaritone baritone = baritone();
+        return baritone.getPathingBehavior().isPathing() || baritone.getCustomGoalProcess().isActive()
+            || baritone.getPathingBehavior().getInProgress().isPresent();
+    }
+
+    public static boolean isPathing() {
+        return baritone().getPathingBehavior().isPathing();
+    }
+
+    /**
+     * True if Baritone is busy with something that is not our goal {@code ours}: another process is in control, or
+     * the custom goal process was given a different goal (e.g. the user's #goto).
+     */
+    public static boolean controlledByOther(Goal ours) {
+        if (!isActive()) return false;
+        IBaritone baritone = baritone();
+        ICustomGoalProcess custom = baritone.getCustomGoalProcess();
+        if (ours == null || custom.getGoal() != ours) return true;
+        IBaritoneProcess inControl = baritone.getPathingControlManager().mostRecentInControl().orElse(null);
+        return inControl != null && inControl != custom;
     }
 
     /**

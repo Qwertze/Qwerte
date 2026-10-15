@@ -29,7 +29,7 @@ public class ItemPreviewScreen extends DispenserScreen {
         container.setItem(4, shown);
 
         DispenserMenu menu = new DispenserMenu(FAKE_CONTAINER_ID, mc.player.getInventory(), container);
-        Component title = Component.literal(String.format("%s x%,d @ %s", stack.getHoverName().getString(), total, stashName));
+        Component title = Component.literal(String.format("%s x%,d @ %s", StackInfo.label(stack), total, stashName));
         mc.setScreen(new ItemPreviewScreen(menu, title));
     }
 

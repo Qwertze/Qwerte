@@ -53,6 +53,9 @@ final class KitBuilder {
         /** Not skipped for having got nothing done, and reachable. */
         boolean usable(Box box);
 
+        /** A stack the builder just moved into this carry slot, so it counts as the stash's and not the player's own. */
+        void held(int slot, ItemStack stack);
+
         /** A chest signed for mixed shulkers whole, like "kits". */
         boolean keepWhole(Box box);
 
@@ -666,6 +669,7 @@ final class KitBuilder {
         int slot = bestStack(live, box.contents.length, i -> box.contents[i]);
         if (slot == -1) return false;
 
+        owner.held(into, box.contents[slot]);
         InvUtils.move().fromId(slot).toId(inventoryToMenu(into, box.contents.length));
         return true;
     }
@@ -684,6 +688,7 @@ final class KitBuilder {
         int slot = bestStack(live, 27, i -> menu.getSlot(i).getItem());
         if (slot == -1) return false;
 
+        owner.held(into, menu.getSlot(slot).getItem());
         InvUtils.move().fromId(slot).toId(inventoryToMenu(into, 27));
         return true;
     }
@@ -735,6 +740,7 @@ final class KitBuilder {
             if (want == null || !want.equals(Kit.keyOf(cur))) {
                 int into = freeSlot();
                 if (into == -1) return false;
+                owner.held(into, cur);
                 InvUtils.move().fromId(s).toId(inventoryToMenu(into, 27));
                 return true;
             }
@@ -743,6 +749,7 @@ final class KitBuilder {
                 int into = spillSlot(cur);
                 if (into == -1) return false;
 
+                owner.held(into, cur);
                 ItemStack there = inv.getItem(into);
                 Clicks clicks = clicksFor(cur.getMaxStackSize(), there.isEmpty() ? 0 : there.getCount(), cur.getCount(), kit.countAt(s));
                 if (clicks == null || clicks.ops.length == 0) return false;

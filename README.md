@@ -113,8 +113,8 @@ switched on and off on its own.
   saves the stash under `stash-name`. After that it only reads containers it hasn't seen before.
 - The saved stash stays up to date: whenever you open one of its containers yourself, even with the module off, what's
   inside is saved.
-- Each stash name on each server is its own stash, so you can keep several. `Rescan` and `Forget stash` buttons in
-  the module's settings start over.
+- Each stash name on each server is its own stash, so you can keep several. `Forget contents` and `Forget stash`
+  buttons in the module's settings start over: the first makes the next run read every container again, the second deletes the saved stash.
 
 #### Sorting
 - **Tiers mode** fills the containers nearest to where you turned it on first, in this order: filled shulkers, empty
@@ -239,8 +239,8 @@ A kit is a set of items packed together in one shulker, slot for slot with the s
 1. Install [Fabric Loader](https://fabricmc.net/use/installer/) for Minecraft **1.21.11** or **1.21.4**.
 2. Put [Meteor Client](https://meteorclient.com) for the same Minecraft version in your `mods` folder.
 3. Download the `qwerte-addon` jar for your Minecraft version from the
-   [latest release](https://github.com/Qwertze/Qwertze/releases/latest): `qwerte-addon-0.2.7+1.21.11.jar` or
-   `qwerte-addon-0.2.7+1.21.4.jar`. Put it in your `mods` folder.
+   [latest release](https://github.com/Qwertze/Qwertze/releases/latest): `qwerte-addon-0.3.0+1.21.11.jar` or
+   `qwerte-addon-0.3.0+1.21.4.jar`. Put it in your `mods` folder.
 4. *(Optional, for auto-walk and refilling)* Download `baritone-api-fabric-1.3.0-<minecraft>.jar` for your version from
    [dekrom's Baritone releases](https://github.com/dekrom/baritone/releases) (for example
    [1.21.11](https://github.com/dekrom/baritone/releases/tag/v1.3.0-1.21.11) or
@@ -341,7 +341,7 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | General | `only-hydrated` | off | Only till blocks that would be hydrated. |
 | General | `auto-switch` | on | Switch to the right item from your hotbar. |
 | General | `swap-back` | on | Switch back to your previous slot afterwards. |
-| General | `rotate` | off | Face blocks while working on them. |
+| General | `rotate` | off | Face blocks while working on them. Placing water, ice and glowstone always rotates. |
 | Planting | `auto-plant` | on | Plant seeds on empty farmland. |
 | Planting | `seeds` | Wheat Seeds | Which seeds to plant. |
 | Planting | `bone-meal` | on | Bone meal crops until fully grown. |
@@ -350,23 +350,60 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | Planting | `restock-at` | 1 | Restock at this many seeds or fewer. |
 | Planting | `seed-storages` | empty | The containers to restock from, managed with `pick-storage` and the list in the module's settings. |
 | Planting | `pick-storage` | off | Right-click a container to add it as a storage, or remove it if it's already one. |
+| Planting | `bone-meal-restock` | off | Restock bone meal when low. |
+| Planting | `bone-meal-restock-mode` | Storage | Storage or Ender Chest. |
+| Planting | `bone-meal-restock-at` | 4 | Restock at this much bone meal or less. |
+| Planting | `bone-meal-storages` | empty | The containers to restock bone meal from, managed with `pick-bone-meal-storage`. |
+| Planting | `pick-bone-meal-storage` | off | Right-click a container to add it as a bone meal storage, or remove it if it's already one. |
 | Water | `auto-water` | on | Dig and fill water holes for dry land. |
+| Water | `water-source` | Bucket | What fills the holes. Bucket pours a water bucket. Ice places an ice block in the hole and breaks it, which turns it into water (needs a solid block under the hole, and doesn't work in the Nether or in creative). |
 | Water | `fill-holes` | on | Fill empty 1x1 holes that would water dry land, even while walking. |
 | Water | `water-side-color` / `water-line-color` | magenta | Colors of the planned water hole. |
+| Water | `light-holes` | off | Put a glowstone block above each water hole this module fills. Glowstone comes from your inventory. |
+| Water | `light-air-place` | on | Place that glowstone by clicking the empty spot above the hole when no block is next to it. Turn off on servers that reject or flag air placing. |
+| Water | `glowstone-restock` | off | Restock glowstone when low. |
+| Water | `glowstone-restock-mode` | Storage | Storage or Ender Chest. |
+| Water | `glowstone-restock-at` | 1 | Restock at this much glowstone or less. |
+| Water | `glowstone-storages` | empty | The containers to restock glowstone from, managed with `pick-glowstone-storage`. |
+| Water | `pick-glowstone-storage` | off | Right-click a container to add it as a glowstone storage, or remove it if it's already one. |
+| Ice | `ice-restock` | off | Restock ice when low. Used with `water-source` set to Ice. |
+| Ice | `ice-restock-mode` | Storage | Storage or Ender Chest. |
+| Ice | `ice-restock-at` | 2 | Restock at this much ice or less. |
+| Ice | `ice-storages` | empty | The containers to restock ice from, managed with `pick-ice-storage`. |
+| Ice | `pick-ice-storage` | off | Right-click a container to add it as an ice storage, or remove it if it's already one. |
+| Hotbar | `auto-hotbar` | on | Keeps the hoe and the items you need in your hotbar: pulls them out of your inventory when missing, and tops up seeds, bone meal, ice and glowstone when the stack runs low. Never drops anything. Protected items (weapons, totems, food, ender pearls and the like) are never moved out of the way. |
+| Hotbar | `hoe-slot` | 0 | The hotbar slot (1-9) to keep the hoe in. 0 uses any free slot. |
+| Hotbar | `seed-slot` | 0 | The hotbar slot (1-9) to keep the seeds in. 0 uses any free slot. |
+| Hotbar | `bone-meal-slot` | 0 | The hotbar slot (1-9) to keep the bone meal in. 0 uses any free slot. |
+| Hotbar | `water-bucket-slot` | 0 | The hotbar slot (1-9) to keep the water bucket in. 0 uses any free slot. |
+| Hotbar | `ice-slot` | 0 | The hotbar slot (1-9) to keep the ice in. 0 uses any free slot. |
+| Hotbar | `glowstone-slot` | 0 | The hotbar slot (1-9) to keep the glowstone in. 0 uses any free slot. |
 | Automation | `auto-walk` | on | Walk to more land with Baritone. Turns itself off if Baritone isn't installed. |
-| Automation | `refill-water` | on | Walk to water and refill empty buckets. |
+| Automation | `refill-water` | on | Walk to water and refill empty buckets. Bucket mode only. |
 | Automation | `refill-source` | Nearest Pool | Nearest Pool or Station. |
 | Automation | `station` | 0, 0, 0 | The water block to refill at. |
 | Automation | `pick-station` | off | Right-click a water block to set it as the station. |
 | Automation | `water-search-radius` | 96 | How far to look for a 4x4 pool. |
+| Automation | `work-pattern` | Nearest | The order to cover land in when nothing is left in reach: Nearest, Rows, Spiral Out or Spiral In. |
+| Automation | `row-direction` | Auto | Which way the Rows lanes run: Auto, North-South or East-West. Auto uses the way you were facing when you turned the module on. |
+| Automation | `lane-width` | 0 | How wide each lane or ring is in blocks. 0 works it out from your reach. |
 | Automation | `search-radius` | 64 | How far from your start point to look for land. |
 | Automation | `search-height` | 1 | How far up and down to look for land. |
-| Automation | `combine-trips` | on | Restock seeds on water trips and refill water on seed trips. |
+| Automation | `combine-trips` | on | Restocks seeds, ice, bone meal and glowstone on the way between trips, and refills empty buckets on the way back from restocking. |
 | Automation | `seed-top-up-at` | 128 | On a water trip, restock seeds if you have fewer than this. |
+| Automation | `ice-top-up-at` | 64 | When combining trips, restock ice if you have fewer than this. |
+| Automation | `bone-meal-top-up-at` | 64 | When combining trips, restock bone meal if you have fewer than this. |
+| Automation | `glowstone-top-up-at` | 32 | When combining trips, restock glowstone if you have fewer than this. |
 | Safety | `anti-break` | on | Don't use hoes that are about to break. |
 | Safety | `min-durability` | 10 | Uses left at which a hoe counts as about to break. |
 | Safety | `disable-when-out` | on | Turn off when you have no usable hoe left. |
-| Render | `render` | on | Highlight blocks about to be tilled. |
+| Safety | `hoe-restock` | off | Restock hoes when low. |
+| Safety | `hoe-restock-mode` | Storage | Storage or Ender Chest. |
+| Safety | `hoe-restock-at` | 0 | Restock at this many usable hoes or fewer. 0 restocks once you have none left. |
+| Safety | `hoe-restock-amount` | 2 | How many hoes to take from each storage visited. |
+| Safety | `hoe-storages` | empty | The containers to restock hoes from, managed with `pick-hoe-storage`. |
+| Safety | `pick-hoe-storage` | off | Right-click a container to add it as a hoe storage, or remove it if it's already one. |
+| Render | `render` | on | Highlight blocks that will be tilled. |
 | Render | `shape-mode` | Both | How the highlight is drawn. |
 | Render | `side-color` / `line-color` | purple / pink | Colors of the highlight. |
 
@@ -378,11 +415,11 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | General | `delay` | 1 | Ticks to wait between batches. |
 | General | `blocks-per-tick` | 6 | How many blocks to place per batch. |
 | General | `dirt-item` | Dirt | Dirt, Coarse Dirt, Rooted Dirt or Grass Block. |
-| General | `below-feet-only` | on | Only cover ground below your feet. |
-| General | `depth` | 1 | How far below your feet to look for ground. |
+| General | `below-feet-only` | on | Only cover ground below your feet, so walls and ledges are left alone. |
+| General | `depth` | 1 | How many blocks below your feet to look for ground. Shown with `below-feet-only`. |
 | General | `skip-own-column` | on | Leave the block you're standing on uncovered. |
 | General | `ignore` | chests, trapped chests, ender chests, barrel, crafting table, furnace | Blocks never covered. |
-| General | `rotate` | off | Face the block being placed against. |
+| General | `rotate` | off | Face the block you're placing against. |
 | General | `swap-back` | on | Switch back to your previous slot afterwards. |
 | General | `disable-when-out` | on | Turn off when out of dirt and unable to restock. |
 | Restock | `restock` | off | Restock dirt when low. |
@@ -390,11 +427,16 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | Restock | `restock-at` | 0 | Restock at this much dirt or less. |
 | Restock | `dirt-storages` | empty | The containers to restock from, managed with `pick-storage` and the list in the module's settings. |
 | Restock | `pick-storage` | off | Right-click a container to add it as a storage, or remove it if it's already one. |
-| Restock | `walk-to-storage` | off | Walk to an out-of-reach storage with Baritone. |
+| Restock | `walk-to-storage` | off | Walk to an out-of-reach storage with Baritone, then walk back. |
+| Hotbar | `auto-hotbar` | on | Keeps dirt in your hotbar: pulls it out of your inventory when it's missing, and tops the stack up when it runs low. Never drops anything. |
+| Hotbar | `dirt-slot` | 0 | The hotbar slot (1-9) to keep the dirt in. 0 uses any free slot. |
 | Automation | `auto-walk` | off | Walk to more uncovered ground with Baritone. Turns itself off if Baritone isn't installed. |
+| Automation | `work-pattern` | Nearest | The order to cover ground in when nothing is left in reach: Nearest, Rows, Spiral Out or Spiral In. |
+| Automation | `row-direction` | Auto | Which way the Rows lanes run: Auto, North-South or East-West. |
+| Automation | `lane-width` | 0 | How wide each lane or ring is in blocks. 0 works it out from your reach. |
 | Automation | `search-radius` | 64 | How far from where you enabled the module to look for ground to cover. |
-| Automation | `search-height` | 1 | How far up and down to look for ground. |
-| Render | `render` | on | Highlight the spots about to be filled. |
+| Automation | `search-height` | 1 | How many blocks above and below you to search. With `below-feet-only` on, `depth` is used below you instead. |
+| Render | `render` | on | Highlight the spots dirt will be placed in. |
 | Render | `shape-mode` | Both | How the highlight is drawn. |
 | Render | `side-color` / `line-color` | brown | Colors of the highlight. |
 
@@ -404,27 +446,39 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 |---|---|---|---|
 | General | `stash-name` | stash | The name the stash is saved under. |
 | General | `mode` | Tiers | Tiers or Signs. |
-| General | `pick` | Off | Right-click to mark containers: Off, Exclude or Drop-off. |
+| General | `pick` | Off | Right-click to mark containers: Off, Exclude, Drop-off or Compact skip. |
 | General | `radius` | 8 | How far around you to look for new containers. |
 | General | `height` | 3 | How far above and below you to look. |
 | General | `barrels` | on | Include barrels as well as chests. |
 | General | `reach` | 4.5 | How close a container has to be to open it. |
 | General | `delay` | 3 | Ticks between inventory clicks. Raise it if the server rejects clicks. |
+| General | `quiet` | 3 | Seconds to wait after you or another module stops using the client before carrying on. Doubles for each repeated interruption within 5 minutes, up to 60 seconds. |
 | General | `walk` | off | Walk to containers out of reach with Baritone. |
 | General | `rotate` | on | Face containers when opening them. |
-| Shulkers | `repack` | on | Signs mode: clean mixed shulkers and pack loose items into bulk shulkers. |
-| Shulkers | `new-bulk-at` | 9 | Start a new bulk shulker from an empty one at this many stacks of one item. 0 only tops up existing ones. |
-| Kits | `build-kits` | off | Signs mode only: build the saved kits out of the stash, into chests signed with the kit's name. |
+| General | `unsigned-overflow` | on | Signs mode: items with nowhere to go, and no chest signed misc, other or overflow, go to a chest with no sign at all (one already in use first). Never a chest signed for something else. |
+| General | `debug` | off | Says in chat why containers are skipped or given up on. Always logged at debug level. |
 | Bot | `stay-on` | off | Keep running after sorting, as a sorting bot. |
 | Bot | `recheck` | 30 | Seconds between drop-off checks. |
-| Slots | `carry-slots` | blank | Slots to carry items in. Blank uses every empty slot. |
+| Labels | `auto-label` | on | Signs mode: puts a sign on an empty, unsigned chest next to the signed ones for items nothing is signed for. Never places or breaks a chest, never breaks a sign. |
+| Labels | `label-gap` | 10 | Seconds to wait between putting up signs. |
+| Watch | `watch` | on | Notices when another player opens and closes a stash container, and reads it again after `watch-delay`. Works with the module off. |
+| Watch | `watch-delay` | 5 | Seconds a container has to stay closed after someone else used it before it's read again. |
+| Watch | `watch-signs` | on | Signs mode, while sorting: notices when a sign's text changes, and sorts by the new text after `sign-delay`. |
+| Watch | `sign-delay` | 10 | Seconds a changed sign is left alone before the stash is sorted by what it says now. |
+| Shulkers | `compact` | on | Signs mode, once everything is sorted: packs 27 full stacks of one item (things that don't stack, from 2 pieces) into an empty unnamed shulker and files it in the item's chest. |
+| Shulkers | `compact-top-up-at` | 9 | Tops up a part-full shulker of one item once this many full stacks of it are waiting. |
+| Shulkers | `compact-exclude` | empty | Items that are never compacted, like ender pearls. |
+| Shulkers | `repack` | on | Signs mode: clean mixed shulkers and pack loose items into bulk shulkers. |
+| Shulkers | `new-bulk-at` | 9 | Start a new bulk shulker from an empty one at this many stacks of one item. 0 only tops up existing ones. Only used while `compact` is off. |
+| Kits | `build-kits` | off | Signs mode only: build the saved kits out of the stash, into chests signed with the kit's name. |
+| Slots | `carry-slots` | blank | Slots to carry items in. Blank uses every slot that's empty when sorting starts. |
 | Slots | `keep-slots` | blank | Slots never to touch. |
 | Search | `whisper-search` | off | Let whitelisted players search by whisper. |
 | Search | `whitelist` | empty | Who can search by whisper. |
 | Search | `prefix` | find | Whispers starting with this are searches. |
 | Render | `render` | on | Highlight the container being worked on, and marked containers. |
 | Render | `shape-mode` | Both | How the highlight is drawn. |
-| Render | `work-color` / `excluded-color` / `drop-off-color` | orange / red / blue | Highlight colors. |
+| Render | `work-color` / `excluded-color` / `compact-skip-color` / `drop-off-color` | orange / red / purple / blue | Highlight colors. |
 
 ### stash-overlay
 

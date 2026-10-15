@@ -16,6 +16,7 @@ import meteordevelopment.meteorclient.events.world.TickEvent;
 import meteordevelopment.meteorclient.renderer.ShapeMode;
 import meteordevelopment.meteorclient.settings.*;
 import meteordevelopment.meteorclient.systems.modules.Module;
+import meteordevelopment.meteorclient.systems.modules.Modules;
 import meteordevelopment.meteorclient.utils.player.FindItemResult;
 import meteordevelopment.meteorclient.utils.player.InvUtils;
 import meteordevelopment.meteorclient.utils.render.color.SettingColor;
@@ -467,6 +468,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
     private void onTick(TickEvent.Pre event) {
         targets.clear();
         storages.tick();
+        busy = false;
 
         // onActivate can run before the player exists
         if (home == null) home = mc.player.blockPosition();
@@ -476,9 +478,13 @@ public class AutoDirt extends Module implements Restocker.Owner {
 
         // Restocking, and walking to and from the storage, take over the whole tick
         if (state != State.Working) {
+            busy = true;
             tickRestock();
             return;
         }
+
+        // The stash sorter is in the middle of a job: no new action starts until it's done
+        if (sorterBusy()) return;
 
         if (autoWalk.get() && !BARITONE) {
             error("Baritone isn't installed, turning off auto-walk.");
@@ -487,6 +493,7 @@ public class AutoDirt extends Module implements Restocker.Owner {
 
         // Low on dirt comes first, then we cover the ground with a full inventory
         if (canRestock() && InvUtils.find(this::isDirtItem).count() <= restockAt.get()) {
+            busy = true;
             startRestock();
             return;
         }
@@ -503,9 +510,13 @@ public class AutoDirt extends Module implements Restocker.Owner {
         findTargets(eyes);
         if (targets.isEmpty()) {
             // Nothing left in reach, go find more ground to cover (only worth it if we've got dirt to place)
-            if (walking() && InvUtils.find(this::isDirtItem).found()) startExplore(eyes);
+            if (walking() && InvUtils.find(this::isDirtItem).found()) {
+                busy = true;
+                startExplore(eyes);
+            }
             return;
         }
+        busy = true;
 
         FindItemResult dirt = InvUtils.findInHotbar(this::isDirtItem);
         if (!dirt.found()) {
@@ -551,6 +562,21 @@ public class AutoDirt extends Module implements Restocker.Owner {
         }
 
         timer = 0;
+    }
+
+    // Whether the last tick did something: walking, restocking or placing, as opposed to waiting for ground to cover
+    private boolean busy;
+
+    /**
+     * True only while it's actually walking, placing or restocking, not while it's on and waiting for something to do.
+     */
+    public boolean working() {
+        return isActive() && busy;
+    }
+
+    private static boolean sorterBusy() {
+        StashSorter sorter = Modules.get().get(StashSorter.class);
+        return sorter != null && sorter.busyWithJob();
     }
 
     private void findTargets(Vec3 eyes) {
