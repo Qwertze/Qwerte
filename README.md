@@ -261,8 +261,8 @@ A kit is a set of items packed together in one shulker, slot for slot with the s
 1. Install [Fabric Loader](https://fabricmc.net/use/installer/) for Minecraft **1.21.11** or **1.21.4**.
 2. Put [Meteor Client](https://meteorclient.com) for the same Minecraft version in your `mods` folder.
 3. Download the `qwerte-addon` jar for your Minecraft version from the
-   [latest release](https://github.com/Qwertze/Qwertze/releases/latest): `qwerte-addon-0.3.0+1.21.11.jar` or
-   `qwerte-addon-0.3.0+1.21.4.jar`. Put it in your `mods` folder.
+   [latest release](https://github.com/Qwertze/Qwertze/releases/latest): `qwerte-addon-0.3.1+1.21.11.jar` or
+   `qwerte-addon-0.3.1+1.21.4.jar`. Put it in your `mods` folder.
 4. *(Optional, for auto-walk and refilling)* Download `baritone-api-fabric-1.3.0-<minecraft>.jar` for your version from
    [dekrom's Baritone releases](https://github.com/dekrom/baritone/releases) (for example
    [1.21.11](https://github.com/dekrom/baritone/releases/tag/v1.3.0-1.21.11) or
