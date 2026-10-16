@@ -5,6 +5,29 @@ All notable changes to Qwerte are documented here. The format follows
 
 Versions before 0.2.8 are listed on the [GitHub releases page](https://github.com/Qwertze/Qwertze/releases).
 
+## [Unreleased]
+
+## [0.3.2-dev.2] - 2026-10-16
+
+### Added
+- stash-sorter: `log-level` (Quiet, Normal, Debug) replaces the `debug` setting. Quiet shows what it is doing now and next, errors and alerts; alerts (things that need a person) are also whispered to the `whitelist`, queued and rate limited. Debug adds the reasons behind its decisions. Whatever a level hides still goes to the log file.
+- stash-sorter: "now / next" lines (`Stash: sorting: taking 5 stacks from "Diamonds" at x y z; next: ...`) for starting, exploring, reading, sorting, repacking, compacting, labelling, ground pickup, bundles, waiting, idle and done. An identical line is never repeated, and progress is said at most every 10 percent or 60 seconds.
+- stash-sorter: a shulker the sorter put down is saved in the stash file with what it is for, and what is carried is saved with it. After a disconnect or stopping the module the next start checks the shulker, finishes packing it, breaks and picks it up and puts it away, before everything is read again. A shulker in another dimension is kept and blocks new shulkers until you are back.
+- stash-sorter: `smart-recheck`: drop-offs are only re-checked when they can change without a lid (hopper, dropper or dispenser next to or above, or unloaded), and less often while nothing is found.
+- stash-sorter: ground pickup in batches, taking on the way to a deposit when a source is nearer, staying at an open container to take or merge instead of reopening it, and reading unknown containers within reach while exploring.
+- stash-sorter: an "Unstuck" button drops whatever the sorter is doing and starts over. The unfinished shulker step is not resumed, the "no more shulkers until restarted" block is lifted, and a shulker of ours still standing is left where it is and listed with the orphaned shulkers. With the module off it only forgets the saved shulker step.
+
+### Changed
+- stash-sorter: every start reads every container again. Old contents stay in use for search and planning, but nothing is taken from a container until it has been read. Containers other players used are marked this way too, instead of being forgotten.
+- stash-sorter: the planner works out how much room each container has once per pass and remembers which containers fit an item for the pass.
+- stash-sorter: compaction picks up its shulker instead of leaving it standing when fewer than 3 stacks of the item are left to pack.
+- stash-sorter: the stash file is written to a temporary file and moved over the old one.
+- stash-sorter: the old `debug` setting is gone, set `log-level` to Debug instead.
+
+### Fixed
+- stash-sorter: a shulker standing for a compaction when the connection dropped was forgotten with no record of it.
+- stash-sorter: a repacked shulker already picked up could be looked for on the ground and then abandoned, because the shulker count was off or a resume expected one more shulker than could be held. Picking up is now told from the count just before the break, and failing that, after 3 s with nothing dropped in sight, from the one held shulker that matches it, only near the spot and with the block gone. Matches Stash Sorter 1.4.0-dev.2.
+
 ## [0.3.2-dev.1] - 2026-10-15
 
 ### Added

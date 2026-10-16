@@ -135,6 +135,12 @@ final class StashLabeller {
 
         void warn(String text);
 
+        /** Needs a person: shown at every log level, and whispered to the whitelist. */
+        void alert(String text);
+
+        /** What is being done now and next, shown at every log level. */
+        void step(String text);
+
         void debug(String text);
     }
 
@@ -148,7 +154,11 @@ final class StashLabeller {
 
     private enum Step { Walk, Hold, Aim, Click, Editor, Write, Verify, Reopen }
 
-    private record Plan(String text, Box box, Containers.Face face) {}
+    private record Plan(String text, Box box, Containers.Face face, String item) {
+        Plan(String text, Box box, Containers.Face face) {
+            this(text, box, face, "");
+        }
+    }
 
     private static final class Group {
         final ItemStack sample;
@@ -384,7 +394,7 @@ final class StashLabeller {
                 if (from != null) return false;
                 if (!noSignsWarned) {
                     noSignsWarned = true;
-                    owner.warn(String.format("No signs to label new categories (\"%s\" and others), so those items go to the catch-all container. Put signs in your inventory or in any container of the stash.", plan.text()));
+                    owner.alert(String.format("No signs to label new categories (\"%s\" and others), so those items go to the catch-all container. Put signs in your inventory or in any container of the stash.", plan.text()));
                 }
                 return false;
             }
@@ -519,7 +529,7 @@ final class StashLabeller {
             if (!doubles.isEmpty()) options = new ArrayList<>(doubles);
         }
         Box chest = owner.nearest(options);
-        return chest == null ? null : new Plan(best, chest, candidates.get(chest));
+        return chest == null ? null : new Plan(best, chest, candidates.get(chest), com.porter.qwerte.stash.StackInfo.label(group.sample));
     }
 
     private static String id(ItemStack stack) {
@@ -710,6 +720,9 @@ final class StashLabeller {
         reopenAfterHold = false;
         editorReady = false;
         editorAt = null;
+        BlockPos at = plan.box().pos;
+        owner.step(String.format("labelling: putting up \"%s\" on the chest at %d %d %d; next: %s.", plan.text(), at.getX(), at.getY(), at.getZ(),
+            plan.item().isEmpty() ? "sort what belongs there into it" : "sort " + plan.item() + " into it"));
         owner.beginLabel(plan.box());
         return true;
     }

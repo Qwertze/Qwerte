@@ -113,8 +113,13 @@ switched on and off on its own.
   saves the stash under `stash-name`. After that it only reads containers it hasn't seen before.
 - The saved stash stays up to date: whenever you open one of its containers yourself, even with the module off, what's
   inside is saved.
+- Every start reads every container again, because players may have changed things while it was off or you were
+  disconnected. What is known stays in use (searching, planning, putting away) until each container is read, but
+  nothing is taken out of a container that hasn't been read since the start.
 - Each stash name on each server is its own stash, so you can keep several. `Forget contents` and `Forget stash`
   buttons in the module's settings start over: the first makes the next run read every container again, the second deletes the saved stash.
+- The **Unstuck** button drops whatever the sorter is doing and starts over. A shulker step that was under way is not
+  resumed: a shulker of ours still standing is left where it is and listed with the orphaned shulkers.
 
 #### Sorting
 - **Tiers mode** fills the containers nearest to where you turned it on first, in this order: filled shulkers, empty
@@ -211,7 +216,29 @@ A kit is a set of items packed together in one shulker, slot for slot with the s
 
 #### Bot mode
 - With `stay-on`, it doesn't turn off when the stash is sorted. It sorts again whenever a container in the stash
-  changes, and checks drop-off containers every `recheck` seconds.
+  changes, and checks drop-off containers every `recheck` seconds. With `smart-recheck` (on) only drop-offs that can
+  change without anyone opening them (a hopper, dropper or dispenser next to or above them, or outside loaded range) are
+  checked, and for each one the wait grows from `recheck` up to 5 minutes while its checks find nothing new. Drop-offs someone opens
+  are noticed from their lids.
+
+#### Messages
+- `log-level` Quiet shows only what it is doing now and next (`Stash: sorting: taking 5 stacks from "Diamonds" at x y
+  z; next: put them away ...`), errors and alerts. Alerts are the things that need a person (a shulker left standing, a
+  shulker that can't be broken, nowhere to put stacks, signs missing, carry slots full, a container that can't be
+  reached); they are also whispered (`/msg`) to everyone on the `whitelist` (whether or not `whisper-search` is on), the
+  same text, digits aside, at most once in 10 minutes, at most 5 waiting and one sent every 5 seconds, and never while you
+  are disconnected. Normal is the usual
+  output. Debug adds why it decides what it does, shown as `[debug]` lines. Whatever a level hides is still written to
+  the log file.
+
+#### If the connection drops or you stop it
+- A shulker the sorter put down (repacking, compacting, kits) is written to the stash file with what it is for. If you
+  disconnect, or stop the module, while one is standing, that is said (`Disconnected mid-job: shulker at x y z kept...`)
+  and the next start walks back to it, checks it is the shulker it put down and holds what was expected, finishes
+  packing it, breaks it, picks it up and puts it away, before reading the containers again. A shulker in another
+  dimension is kept in the record and no new shulkers are put down until you are back there. Kit shulkers are just
+  picked up again. What it carries is saved too, so it is put away after a restart.
+- After a disconnect the module switches itself off; turn it on again to resume.
 
 #### Stash perimeter
 - Set a perimeter with `pick` modes **Area corner 1** and **Area corner 2** (the block you right-click becomes the
@@ -509,9 +536,10 @@ station. If you'd rather work hands-on, turn off `auto-walk`, `auto-water` and `
 | General | `walk` | off | Walk to containers out of reach with Baritone. |
 | General | `rotate` | on | Face containers when opening them. |
 | General | `unsigned-overflow` | on | Signs mode: items with nowhere to go, and no chest signed misc, other or overflow, go to a chest with no sign at all (one already in use first). Never a chest signed for something else. |
-| General | `debug` | off | Says in chat why containers are skipped or given up on. Always logged at debug level. |
+| General | `log-level` | Normal | Quiet: now/next lines, errors and alerts (alerts are also whispered to the whitelist). Normal: the usual messages. Debug: also why it decides what it does. Replaces `debug`. |
 | Bot | `stay-on` | off | Keep running after sorting, as a sorting bot. |
-| Bot | `recheck` | 30 | Seconds between drop-off checks. |
+| Bot | `recheck` | 30 | Seconds between drop-off checks (the shortest wait with `smart-recheck`). |
+| Bot | `smart-recheck` | on | Only check drop-offs that can change unseen (hopper, dropper or dispenser next to or above, or unloaded), waiting longer, up to 5 minutes, while nothing is found. Off checks every drop-off every `recheck` seconds. |
 | Ground | `collect-ground` | on | Between jobs, picks up items other players left lying in the stash area, when no other player is loaded. Needs Baritone. Never your own drops or items from blocks you broke. |
 | Ground | `collect-range` | 8 | Blocks around the outermost containers to pick up from (and 4 up and down). |
 | Labels | `auto-label` | on | Signs mode: puts a sign on an empty, unsigned chest next to the signed ones for items nothing is signed for. Never places or breaks a chest, never breaks a sign. |

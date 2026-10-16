@@ -65,6 +65,9 @@ final class StashYield {
         int quietSeconds();
 
         void say(String text);
+
+        /** What is being done now and next, shown at every log level. */
+        void step(String text);
     }
 
     private static final int INTERRUPTION_WINDOW = 20 * 60 * 5;
@@ -224,6 +227,7 @@ final class StashYield {
         if (waitStart >= 0) return;
         waitStart = now;
         owner.say(String.format("Waiting for you/another module (%s).", reason == null ? "a stack on the cursor" : reason.label));
+        owner.step(String.format("waiting: %s; next: carry on after %ds of quiet.", reason == null ? "a stack on the cursor" : reason.label, quietTicks() / 20));
     }
 
     void endWaiting() {

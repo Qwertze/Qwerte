@@ -319,7 +319,7 @@ final class KitBuilder {
     }
 
     private boolean source(Box box) {
-        return box.sortable() && !box.dropOff && owner.usable(box) && !Kits.isKitBox(box) && !owner.keepWhole(box);
+        return box.sortable() && !box.stale && !box.dropOff && owner.usable(box) && !Kits.isKitBox(box) && !owner.keepWhole(box);
     }
 
     /**

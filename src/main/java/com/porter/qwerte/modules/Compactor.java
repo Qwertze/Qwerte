@@ -107,6 +107,12 @@ final class Compactor {
         void alert(String text);
 
         void debug(String text);
+
+        /** What is being done now and next, shown at every log level. */
+        void step(String text);
+
+        /** The plan, or where its shulker stands, changed: the sorter saves what a restart needs to finish it. */
+        void changed();
     }
 
     private static final int COOLDOWN = 20 * 60 * 10;
@@ -129,6 +135,8 @@ final class Compactor {
         int placedSize;
         int jobs, acquireTries, slotHint = -1;
         boolean aborting;
+        // Rebuilt after a restart: only the standing shulker is finished (packed with what is carried, broken, picked up)
+        boolean finishOnly;
 
         Plan(BulkKey key, ItemStack sample, String name, boolean topUp, int startSize, int target) {
             this.key = key;
@@ -181,8 +189,53 @@ final class Compactor {
     }
 
     /**
+     * The plan as it is saved for a restart, or null without one.
+     */
+    Stash.Compact snapshot() {
+        Plan p = plan;
+        if (p == null) return null;
+        Stash.Compact c = new Stash.Compact();
+        c.sample = p.sample.copy();
+        c.name = p.name;
+        c.topUp = p.topUp;
+        c.startSize = p.startSize;
+        c.target = p.target;
+        c.sourceBox = p.sourceBox == null ? null : p.sourceBox.pos;
+        c.sourceSlot = p.sourceSlot;
+        c.placedPos = p.placedPos;
+        c.placedSize = p.placedSize;
+        c.jobs = p.jobs;
+        c.aborting = p.aborting;
+        return c;
+    }
+
+    /**
+     * Builds the plan again from what was saved, to finish the shulker it left standing. Null if the item can't be
+     * packed any more.
+     */
+    Plan restore(Stash.Compact c, String dimension) {
+        StackInfo info = StackInfo.of(c.sample);
+        BulkKey key = info == null ? null : info.bulkKey();
+        if (key == null) return null;
+        Plan p = new Plan(key, c.sample.copyWithCount(1), c.name, c.topUp, c.startSize, c.target);
+        p.sourceSlot = c.sourceSlot;
+        p.placedPos = c.placedPos;
+        p.dimension = dimension;
+        p.placedSize = c.placedSize;
+        p.jobs = c.jobs;
+        p.aborting = c.aborting;
+        p.finishOnly = true;
+        plan = p;
+        return p;
+    }
+
+    /**
      * For the summary at the end of a run: what was packed and freed, once.
      */
+    int runPacked() {
+        return runPacked;
+    }
+
     String takeRunSummary() {
         if (runPacked == 0) return "";
         String text = String.format(" Packed %d shulkers, freed %d slots.", runPacked, runFreed);
@@ -256,7 +309,7 @@ final class Compactor {
      * whose sign is changing.
      */
     private boolean source(Box b) {
-        return b.sortable() && !b.dropOff && !b.noCompact && !owner.signPending(b) && !owner.isKitBox(b)
+        return b.sortable() && !b.stale && !b.dropOff && !b.noCompact && !owner.signPending(b) && !owner.isKitBox(b)
             && b.labels.stream().noneMatch(Categories::isKeepWhole);
     }
 
@@ -313,6 +366,20 @@ final class Compactor {
 
     private Box sourceBox(Plan p) {
         return owner.nearest(owner.stash().boxes.stream().filter(b -> source(b) && !owner.gatherBlocked(b) && hasFull(b, p.key)).toList());
+    }
+
+    private static final int LEAVE_MIN_STACKS = 3;
+
+    /**
+     * How many full stacks of the plan's item are still in the chests it may be gathered from.
+     */
+    private int fullStacksLeft(Plan p) {
+        int n = 0;
+        for (Box b : owner.stash().boxes) {
+            if (!source(b) || owner.gatherBlocked(b)) continue;
+            for (ItemStack stack : b.contents) if (full(stack) && p.key.equals(keyOf(stack))) n++;
+        }
+        return n;
     }
 
     private Partial partialOf(Box box, int slot, ItemStack shulker) {
@@ -466,6 +533,7 @@ final class Compactor {
         }
 
         plan = best;
+        owner.changed();
         blocker = "";
         lastWhy = "";
         int moves = best.target - best.startSize;
@@ -481,7 +549,7 @@ final class Compactor {
         Found best = null;
         boolean bestSigned = false;
         for (Box box : owner.stash().boxes) {
-            if (!box.sortable() || box.noCompact || owner.signPending(box) || owner.fetchBlocked(box) || owner.isKitBox(box)) continue;
+            if (!box.sortable() || box.stale || box.noCompact || owner.signPending(box) || owner.fetchBlocked(box) || owner.isKitBox(box)) continue;
             if (box.labels.stream().anyMatch(Categories::isKeepWhole)) continue;
             boolean signed = box.labels.stream().anyMatch(l -> l.toLowerCase(Locale.ROOT).contains("shulker"));
             for (int i = 0; i < box.contents.length; i++) {
@@ -513,6 +581,7 @@ final class Compactor {
         blocker = why;
         owner.debug("Compacting " + p.name + " given up on: " + why + ".");
         p.aborting = true;
+        owner.changed();
     }
 
     /**
@@ -532,7 +601,7 @@ final class Compactor {
 
         // A shulker standing in another dimension is left where it is: it stays in the records
         if (p.placedPos != null && !p.dimension.isEmpty() && !p.dimension.equals(dimension())) {
-            owner.warn("The shulker I left standing at " + p.placedPos.toShortString() + " is in another dimension, leaving it there.");
+            owner.alert("The shulker I left standing at " + p.placedPos.toShortString() + " is in another dimension, leaving it there.");
             plan = null;
             return false;
         }
@@ -549,6 +618,18 @@ final class Compactor {
         }
         if (p.placedPos != null && goneAt(p.placedPos)) return recoverLost(p);
 
+        // Rebuilt after a restart: the standing shulker is packed with what is carried and picked up, then it is over
+        if (p.finishOnly) {
+            if (p.placedPos != null) {
+                packStep(p, 0);
+                return owner.pack(p);
+            }
+            cooldown.put(p.key, owner.ticks() + DONE_COOLDOWN);
+            plan = null;
+            owner.changed();
+            return false;
+        }
+
         boolean placedNow = p.placedPos != null;
         int shulkerSlot = placedNow ? -1 : findPlanShulker();
         int have = placedNow ? p.placedSize : shulkerSlot >= 0 ? stacksIn(mc.player.getInventory().getItem(shulkerSlot)) : -1;
@@ -557,7 +638,10 @@ final class Compactor {
         int free = owner.freeCarryCount();
 
         if (have >= p.target) {
-            if (placedNow) return owner.pack(p);
+            if (placedNow) {
+                packStep(p, 0);
+                return owner.pack(p);
+            }
             complete(p, have);
             return false;
         }
@@ -570,11 +654,17 @@ final class Compactor {
         }
 
         int remaining = p.target - have;
-        if (carriedMatch >= remaining || (carriedMatch > 0 && free <= 1)) return owner.pack(p);
+        if (carriedMatch >= remaining || (carriedMatch > 0 && free <= 1)) {
+            packStep(p, carriedMatch);
+            return owner.pack(p);
+        }
 
         Box from = sourceBox(p);
         if (from == null) {
-            if (carriedMatch > 0) return owner.pack(p);
+            if (carriedMatch > 0) {
+                packStep(p, carriedMatch);
+                return owner.pack(p);
+            }
             abort("not enough left to pack");
             return next();
         }
@@ -587,7 +677,22 @@ final class Compactor {
         }
         gatherLeft = batch;
         p.jobs++;
+        owner.step(String.format("compacting %s: gathering %d stacks (%d/%d packed); next: pack them into %s.", p.name, batch, have, p.target, shulkerText(p)));
         return owner.gather(from);
+    }
+
+    private static String xyz(BlockPos pos) {
+        return pos.getX() + " " + pos.getY() + " " + pos.getZ();
+    }
+
+    private static String shulkerText(Plan p) {
+        if (p.placedPos != null) return "the shulker at " + xyz(p.placedPos);
+        return mc.player == null ? "a shulker" : "a shulker beside " + xyz(mc.player.blockPosition());
+    }
+
+    private void packStep(Plan p, int stacks) {
+        owner.step(String.format("compacting %s: packing %d stacks into %s (%d/%d packed); next: break it and pick it up.", p.name,
+            stacks, shulkerText(p), Math.max(p.placedSize, p.startSize), p.target));
     }
 
     private boolean acquire(Plan p) {
@@ -614,6 +719,8 @@ final class Compactor {
             wants = this::emptyShulker;
         }
         p.jobs++;
+        owner.step(String.format("compacting %s: fetching %s from the chest at %s; next: gather %d stacks (%d/%d packed).", p.name,
+            p.topUp ? "the shulker to top up" : "an empty shulker", xyz(box.pos), p.target - p.startSize, p.startSize, p.target));
         return owner.fetch(box, slot, wants);
     }
 
@@ -624,6 +731,7 @@ final class Compactor {
         BlockPos at = p.placedPos;
         p.placedPos = null;
         p.aborting = true;
+        owner.changed();
         owner.alert(String.format("The shulker holding %d stacks of %s that I put down at %s is gone. Looking for it on the ground.", p.placedSize, p.name, at.toShortString()));
         return owner.recover(p, at);
     }
@@ -642,6 +750,7 @@ final class Compactor {
         boolean gear = p.topUp && p.sample.getMaxStackSize() == 1;
         cooldown.put(p.key, owner.ticks() + (gear ? GEAR_COOLDOWN : DONE_COOLDOWN));
         plan = null;
+        owner.changed();
         owner.headway();
     }
 
@@ -724,7 +833,10 @@ final class Compactor {
             return false;
         }
 
-        boolean more = !p.aborting && size < p.target && sourceBox(p) != null && owner.freeCarryCount() >= 2;
+        // With fewer than 3 stacks left to come the shulker is not left standing for them: it is picked up, and the rest
+        // goes in the next time
+        boolean more = !p.aborting && !p.finishOnly && size < p.target && sourceBox(p) != null && owner.freeCarryCount() >= 2
+            && Math.min(p.target - size, fullStacksLeft(p)) >= LEAVE_MIN_STACKS;
         if (more) {
             p.placedPos = placed;
             p.dimension = dimension();

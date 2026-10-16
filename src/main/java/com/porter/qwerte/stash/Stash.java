@@ -46,6 +46,9 @@ public class Stash {
         public boolean labelFailed;
         // Never used to gather stacks or shulkers for compacting
         public boolean noCompact;
+        // Its contents are from an earlier visit and are due to be read again. Not saved. Searching and planning go on
+        // with what is known, but nothing is taken from it until it has been read
+        public boolean stale;
 
         public Box(BlockPos pos, List<BlockPos> parts) {
             this.pos = pos;
@@ -94,7 +97,48 @@ public class Stash {
         }
     }
 
+    /**
+     * The compaction a standing shulker belongs to: what is being packed and where it is.
+     */
+    public static class Compact {
+        public ItemStack sample = ItemStack.EMPTY;
+        public String name = "";
+        public boolean topUp;
+        public int startSize, target;
+        public BlockPos sourceBox;
+        public int sourceSlot = -1;
+        public BlockPos placedPos;
+        public int placedSize, jobs;
+        public boolean aborting;
+    }
+
+    /**
+     * A shulker step that was under way when the sorter stopped or the connection dropped, saved so the next start can
+     * finish it: the shulker standing in the world, what it is for and what state the work was in.
+     */
+    public static class InFlight {
+        public static final int VERSION = 1;
+        public int version = VERSION;
+        public long savedAt;
+        public String dimension = "";
+        public String job = "", handle = "", returnTo = "";
+        public BlockPos placed;
+        public boolean confirmed;
+        public String placedItemId = "";
+        public int placedStacks;
+        // A stack of what is being packed, and the item a mixed shulker is mostly full of
+        public ItemStack fillSample = ItemStack.EMPTY;
+        public String cleanMainId = "";
+        public BlockPos lastGoodStand;
+        public BlockPos target;
+        public Compact compact;
+    }
+
     public final List<Orphan> orphans = new ArrayList<>();
+    // The stacks the sorter took out of the stash and carries, by inventory slot, so they are still known as the stash's
+    // after a restart
+    public final java.util.Map<Integer, ItemStack> held = new java.util.LinkedHashMap<>();
+    public InFlight inFlight;
     public final String name;
     public final String server;
     public final List<Box> boxes = new ArrayList<>();
@@ -307,9 +351,19 @@ public class Stash {
         }
     }
 
+    // The registries of the last world we saw, so the stash can still be written while the world is being left
+    private static net.minecraft.core.RegistryAccess lastRegistries;
+
+    /** Remembers the registries of the world we are in, for a save made after it is gone. */
+    public static void remember() {
+        if (mc.level != null) lastRegistries = mc.level.registryAccess();
+    }
+
     public void save() {
-        if (mc.level == null) return;
-        RegistryOps<Tag> ops = mc.level.registryAccess().createSerializationContext(NbtOps.INSTANCE);
+        remember();
+        net.minecraft.core.RegistryAccess registries = mc.level != null ? mc.level.registryAccess() : lastRegistries;
+        if (registries == null) return;
+        RegistryOps<Tag> ops = registries.createSerializationContext(NbtOps.INSTANCE);
 
         CompoundTag root = new CompoundTag();
         root.putString("name", name);
@@ -357,17 +411,128 @@ public class Stash {
         }
         root.put("orphans", lost);
 
+        ListTag heldList = new ListTag();
+        for (var entry : held.entrySet()) {
+            int slot = entry.getKey();
+            ItemStack.CODEC.encodeStart(ops, entry.getValue()).result().ifPresent(item -> {
+                CompoundTag tag = new CompoundTag();
+                tag.putInt("slot", slot);
+                tag.put("item", item);
+                heldList.add(tag);
+            });
+        }
+        root.put("held", heldList);
+
+        if (inFlight != null) root.put("inFlight", writeInFlight(inFlight, ops));
+
         if (corner1 != null) root.put("corner1", positions(List.of(corner1)));
         if (corner2 != null) root.put("corner2", positions(List.of(corner2)));
         if (!areaDimension.isEmpty()) root.putString("areaDimension", areaDimension);
 
         try {
             Files.createDirectories(folder());
-            NbtIo.writeCompressed(root, file(name, server));
+            // Written beside the file and moved over it, so a crash in the middle never leaves half a stash
+            Path target = file(name, server);
+            Path temp = target.resolveSibling(target.getFileName() + ".tmp");
+            NbtIo.writeCompressed(root, temp);
+            try {
+                Files.move(temp, target, java.nio.file.StandardCopyOption.ATOMIC_MOVE, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } catch (java.nio.file.AtomicMoveNotSupportedException e) {
+                Files.move(temp, target, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            }
             dirty = false;
         } catch (IOException e) {
             QwerteAddon.LOG.error("Couldn't save stash {}", name, e);
         }
+    }
+
+    private static CompoundTag writeInFlight(InFlight f, RegistryOps<Tag> ops) {
+        CompoundTag tag = new CompoundTag();
+        tag.putInt("version", f.version);
+        tag.putLong("savedAt", f.savedAt);
+        tag.putString("dimension", f.dimension);
+        tag.putString("job", f.job);
+        tag.putString("handle", f.handle);
+        tag.putString("returnTo", f.returnTo);
+        if (f.placed != null) tag.put("placed", positions(List.of(f.placed)));
+        tag.putBoolean("confirmed", f.confirmed);
+        tag.putString("placedItemId", f.placedItemId);
+        tag.putInt("placedStacks", f.placedStacks);
+        if (!f.fillSample.isEmpty()) ItemStack.CODEC.encodeStart(ops, f.fillSample).result().ifPresent(item -> tag.put("fillSample", item));
+        tag.putString("cleanMainId", f.cleanMainId);
+        if (f.lastGoodStand != null) tag.put("lastGoodStand", positions(List.of(f.lastGoodStand)));
+        if (f.target != null) tag.put("target", positions(List.of(f.target)));
+        if (f.compact != null) {
+            Compact c = f.compact;
+            CompoundTag ct = new CompoundTag();
+            if (!c.sample.isEmpty()) ItemStack.CODEC.encodeStart(ops, c.sample).result().ifPresent(item -> ct.put("sample", item));
+            ct.putString("name", c.name);
+            ct.putBoolean("topUp", c.topUp);
+            ct.putInt("startSize", c.startSize);
+            ct.putInt("target", c.target);
+            if (c.sourceBox != null) ct.put("sourceBox", positions(List.of(c.sourceBox)));
+            ct.putInt("sourceSlot", c.sourceSlot);
+            if (c.placedPos != null) ct.put("placedPos", positions(List.of(c.placedPos)));
+            ct.putInt("placedSize", c.placedSize);
+            ct.putInt("jobs", c.jobs);
+            ct.putBoolean("aborting", c.aborting);
+            tag.put("compact", ct);
+        }
+        return tag;
+    }
+
+    private static BlockPos readPos(CompoundTag tag, String key) {
+        if (!(tag.get(key) instanceof ListTag list)) return null;
+        List<BlockPos> at = readPositions(list);
+        return at.isEmpty() ? null : at.getFirst();
+    }
+
+    private static String text(CompoundTag tag, String key) {
+        String s = string(tag.get(key));
+        return s == null ? "" : s;
+    }
+
+    private static ItemStack readStack(RegistryOps<Tag> ops, Tag tag) {
+        if (tag == null) return ItemStack.EMPTY;
+        return ItemStack.CODEC.parse(ops, tag).result().orElse(ItemStack.EMPTY);
+    }
+
+    private static InFlight readInFlight(CompoundTag tag, RegistryOps<Tag> ops) {
+        InFlight f = new InFlight();
+        f.version = number(tag.get("version"), 0);
+        // From a version this one doesn't understand: ignored
+        if (f.version != InFlight.VERSION) return null;
+        f.savedAt = NbtOps.INSTANCE.getNumberValue(tag.get("savedAt")).result().map(Number::longValue).orElse(0L);
+        f.dimension = text(tag, "dimension");
+        f.job = text(tag, "job");
+        f.handle = text(tag, "handle");
+        f.returnTo = text(tag, "returnTo");
+        f.placed = readPos(tag, "placed");
+        f.confirmed = flag(tag, "confirmed");
+        f.placedItemId = text(tag, "placedItemId");
+        f.placedStacks = number(tag.get("placedStacks"), 0);
+        f.fillSample = readStack(ops, tag.get("fillSample"));
+        f.cleanMainId = text(tag, "cleanMainId");
+        f.lastGoodStand = readPos(tag, "lastGoodStand");
+        f.target = readPos(tag, "target");
+        if (f.placed == null) return null;
+        if (tag.get("compact") instanceof CompoundTag ct) {
+            Compact c = new Compact();
+            c.sample = readStack(ops, ct.get("sample"));
+            c.name = text(ct, "name");
+            c.topUp = flag(ct, "topUp");
+            c.startSize = number(ct.get("startSize"), 0);
+            c.target = number(ct.get("target"), 0);
+            c.sourceBox = readPos(ct, "sourceBox");
+            c.sourceSlot = number(ct.get("sourceSlot"), -1);
+            c.placedPos = readPos(ct, "placedPos");
+            c.placedSize = number(ct.get("placedSize"), 0);
+            c.jobs = number(ct.get("jobs"), 0);
+            c.aborting = flag(ct, "aborting");
+            // Without the item there is nothing to rebuild the plan from
+            if (!c.sample.isEmpty()) f.compact = c;
+        }
+        return f;
     }
 
     /**
@@ -394,6 +559,15 @@ public class Stash {
             }
             String areaDim = string(root.get("areaDimension"));
             if (areaDim != null) stash.areaDimension = areaDim;
+            if (root.get("held") instanceof ListTag heldList) {
+                for (Tag t : heldList) {
+                    if (!(t instanceof CompoundTag tag)) continue;
+                    int slot = number(tag.get("slot"), -1);
+                    ItemStack stack = readStack(ops, tag.get("item"));
+                    if (slot >= 0 && !stack.isEmpty()) stash.held.put(slot, stack);
+                }
+            }
+            if (root.get("inFlight") instanceof CompoundTag flight) stash.inFlight = readInFlight(flight, ops);
             ListTag list = (ListTag) root.get("boxes");
             if (list == null) return stash;
 

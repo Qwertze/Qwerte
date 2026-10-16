@@ -70,6 +70,9 @@ final class GroundCollector {
         void say(String text);
 
         void debug(String text);
+
+        /** What is being done now and next, shown at every log level. */
+        void step(String text);
     }
 
     // Ticks an item has to lie still before it is picked up
@@ -382,6 +385,7 @@ final class GroundCollector {
         tripping = true;
         status = String.format("picking up %d %s", targetStack.getCount(), targetName);
         owner.say(String.format("Picking up %d %s from the ground at [%d, %d, %d].", targetStack.getCount(), targetName, at.getX(), at.getY(), at.getZ()));
+        owner.step(String.format("ground: picking up %d stacks near %d %d %d; next: put them away.", found.size(), at.getX(), at.getY(), at.getZ()));
         confined = true;
         owner.confine();
         owner.walkTo(at);
